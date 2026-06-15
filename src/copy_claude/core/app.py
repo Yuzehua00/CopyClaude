@@ -1,14 +1,30 @@
 from __future__ import annotations
 import asyncio
+import json
 import logging
 import copy_claude
+from pathlib import Path
 import sys
+import fnmatch
 from datetime import datetime,UTC
 # 后端的核心，接收cli的请求并返回信息。
 from copy_claude.core.config import CopyClaudeConfig,get_config
-from copy_claude.core.bus.commands import PingCommand,PongResult
+from copy_claude.core.bus.commands import (
+    PingCommand,
+    PongResult,
+    EventSubscribeCommand,
+    EventSubscribeResult,
+    AgentRunCommand,
+    AgentRunResult
+)
+from copy_claude.core.bus.envelope import EventPushEnvelope
 from copy_claude.core.logging_setup import setup_logging
-from copy_claude.core.transport.socket_server import SocketServer
+from copy_claude.core.transport.socket_server import SocketServer,get_connection_writer
+from copy_claude.core.events.bus import EventBus
+from copy_claude.core.events.writer import EventWriter
+from copy_claude.core.transport.ipc_broadcaster import IpcEventBroadcaster
+from copy_claude.core.runs import events_file,new_run_id
+from copy_claude.core.runner import AgentRunner
 from typing import Dict,Any
 import signal
 # kama-core 的入口在 core/app.py，它加载配置、初始化日志、创建 SocketServer，然后注册 core.ping：
@@ -16,7 +32,14 @@ import time
 logger = logging.getLogger(__name__)
 
 class CoreApp: # 所有用户的命令处理器都在这里定义，真正的核心业务逻辑。
-    async def _ping_handler(self,params:Dict[str:Any])->PongResult:
+    def __init__(self) -> None:
+        self._bus = EventBus()
+        # 事件广播器推送机制与EventWriter并列，一旦事件发生，EventWriter写下来，广播器推送到网络。如此说广播器也该有handle函数。
+        self._IpcEventBroadcaster = IpcEventBroadcaster()
+        self._bus.subscribe(self._IpcEventBroadcaster.handle) # 订阅事件广播器的处理事件函数。
+        self._current_run_task: asyncio.Task[None] | None = None
+
+    async def _ping_handler(self,params:Dict[str:Any])->PongResult: # 处理ping命令
         cmd = PingCommand.model_validate(params) # 此种语境下传过来的是PingCommand
         logger.debug("ping from %s", cmd.client)
         return PongResult(
@@ -25,14 +48,79 @@ class CoreApp: # 所有用户的命令处理器都在这里定义，真正的核
             received_at=datetime.now(UTC).isoformat(),
         )
 
+    async def _subscribe_handler(self,params:Dict[str:Any])->EventSubscribeResult:
+        cmd = EventSubscribeCommand.model_validate(params) # 验证输入之后还要获取连接的写程序。才能把正确广播给订阅事件的端口。
+        writer = get_connection_writer()
+
+        replay_count = 0
+        if cmd.replay_from_run is not None: # 如果不是None执行回放机制。未实现
+            replay_count = await self._replay_events(run_id=cmd.replay_from_run,
+                                                     writer=writer,
+                                                     topics=cmd.topics,)
+        subscribe_id = self._IpcEventBroadcaster.subscribe(writer=writer,
+                                                           topics=cmd.topics,
+                                                           scope=cmd.scope,)
+        return EventSubscribeResult(subscribe_id=subscribe_id,
+                                    replay_count=replay_count)
+
+    async def _agent_run_handler(self,params:Dict[str:Any])->AgentRunResult: # 在守护进程启动AgentRunner。
+        cmd = AgentRunCommand.model_validate(params)
+        if self._current_run_task and not self._current_run_task.done():
+            raise RuntimeError("a run is already in progress")
+        run_id = new_run_id()
+        runner = AgentRunner(config=self.config,
+                             bus=self._bus,)
+        self._current_run_task = asyncio.create_task(runner.run(goal=cmd.goal,run_id=run_id))
+        return AgentRunResult(run_id=run_id,)
+
+    async def _replay_events(self,
+             run_id:str,
+             writer: asyncio.StreamWriter,
+             topics: list[str],
+             )->int:
+        path = events_file(run_id) # 得到在本地runs文件夹下的run_id的events.jsonl，但有可能找不到。
+        if not path.exists():
+            for candidate in Path("~/.copyclaude/sessions").expanduser().glob(
+                    f"*/runs/{run_id}/events.jsonl"
+            ): # glob函数的功能和原理是什么？难道返回的是一个列表？
+                path = candidate
+                break
+        if not path.exists(): # 去C盘找依旧失败则直接返回
+            return 0
+
+        # 程序执行到此说明成功找到路径。此时应该读取jsonl文件。
+        count = 0
+        for line in path.read_text().splitlines():
+            if not line:
+                continue
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+
+            event_type:str = event.get("type","")
+            if not any(fnmatch.fnmatch(event_type, p) for p in topics): # fnmatch函数的功能具体是什么？
+                continue
+            # 执行推送程序。要有EventPushEnvelope,用writer.write发送。
+            envelope = EventPushEnvelope(event=event)
+            writer.write(envelope.model_dump_json().encode()+b"\n")
+            count += 1
+        if count:
+            await writer.drain() # 只有有count时才需要等待写程序写完。
+        return count
+
+
+
     async def run(self)->None: # 接收前端发送的信息
         # kama-core 的入口在 core/app.py，它加载配置、初始化日志、创建 SocketServer，然后注册 core.ping：
         self._start_time = time.monotonic()
         self.config = get_config()
         setup_logging(self.config)
         # 创建SocketServer,并把CoreApp的Handler交给SocketServer
-        server = SocketServer(self.config.host,self.config.port)
+        server = SocketServer(self.config.host,self.config.port) # 只要涉及新命令就要在CoreApp.run()增加指令
         server.register("core.ping",self._ping_handler)
+        server.register("agent.run", self._agent_run_handler)
+        server.register("event.subscribe", self._subscribe_handler)
 
         addr = await server.start()
         logger.info("Agent核心 %s 正在监听的ip地址为=%s", copy_claude.__version__, addr)

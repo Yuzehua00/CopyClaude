@@ -34,10 +34,16 @@ class JsonRpcSuccess(BaseModel):
     id: str
     result: Any
 
+class EventPushEnvelope(BaseModel):
+    kind: Literal["event"] = "event"
+    event: dict[str, Any] # Event.model_dump() 的序列化结果
+
+
 class HandlerError(Exception): # 处理器错误
     def __init__(self, code: int, message: str, data: Any|None) -> None:
         super().__init__(message)
         self.code = code
         self.data = data
-def make_error(id: str | None,code: int, message: str, data: Any|None) -> JsonRpcError: # 此函数用于报错，符合JsonRpcError格式
+def make_error(id: str | None,code: int, message: str, data: Any = None) -> JsonRpcError: # 此函数用于报错，符合JsonRpcError格式
     return JsonRpcError(id=id, error=JsonRpcErrorObject(code=code, message=message, data=data))
+

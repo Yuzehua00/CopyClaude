@@ -4,7 +4,7 @@ import asyncio
 import logging
 import json
 from datetime import datetime,UTC
-
+from contextvars import ContextVar
 from pydantic import BaseModel,ValidationError
 from collections.abc import Awaitable, Callable # ?
 from typing import Any
@@ -31,6 +31,12 @@ logger = logging.getLogger(__name__)
 
 def _now() -> str:
     return datetime.now(UTC).isoformat() # 返回目前的时间
+
+'''-----------------------------------------获取连接的写程序----------------------------------------------------'''
+_writer_var: ContextVar[asyncio.StreamWriter] = ContextVar("_writer_var") # 每一个协程的上下文变量。可以用来存信息
+
+def get_connection_writer():
+    return _writer_var.get()
 
 class SocketServer:
     def __init__(self,
@@ -95,9 +101,9 @@ class SocketServer:
         try:
             await self._read_loop(reader, writer) # 读循环？
         finally:
-            self._active_writers.discard(writer) # discard？
-            if self._broadcaster is not None: # ?
-                self._broadcaster.unsubscribe(writer)
+            self._active_writers.discard(writer) # discard类似清除吧
+            if self._broadcaster is not None: # 如果有广播器
+                self._broadcaster.unsubscribe(writer) # 广播器清除掉掉线的writer
             try:
                 writer.close()
             except Exception:
@@ -135,8 +141,9 @@ class SocketServer:
             return
 
         # 程序执行到此，说明找到了对应命令的处理办法，handler要承接req里的params作为参数
-        try:
-            result = await handler(req.params)
+        try: # 新加的内容
+            _writer_var.set(writer) # 在协程上下文中存储writer，就可以用函数get_connection_writer函数中得到它。
+            result = await handler(req.params) # 在调用协程前存储信息。
         except ValidationError as e:
             await self._send(writer, make_error(req.id, INVALID_PARAMS, "Invalid params", str(e)))
             return
