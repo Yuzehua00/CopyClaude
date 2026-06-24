@@ -12,6 +12,7 @@ class ExecutionContext: # Agent记忆模块。聊天上下文,每次交互的时
     step: int = 0 # 当前步数
     status: str = "running"  # "running" | "success" | "failed" ，决定是否运行
     reason: str | None = None
+    result: str = ""
 
     def __post_init__(self) -> None:
         # goal 在初始化时自动变成第一条对话消息

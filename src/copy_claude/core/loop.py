@@ -27,6 +27,7 @@ class AgentLoop:
                     tool_schemas = self._registry.tool_schemas(),
                     bus = self._bus,
                     run_id=context.run_id,
+                    step=context.step,
                 ) # 需要给大模型提供上下文messages和可用工具，run_id和bus事件。
             except asyncio.CancelledError:
                 context.mark_failed("cancelled") # 记录系统记录llm运行错误及原因。

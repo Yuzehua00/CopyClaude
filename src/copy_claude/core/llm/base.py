@@ -3,7 +3,7 @@ from typing import Protocol
 # 需要返回response
 from copy_claude.core.llm.types import LlmResponse
 from copy_claude.core.events.bus import EventBus
-class LLMProvider(Protocol): # 未实现
+class LLMProvider(Protocol): #
     async def chat(self,
              messages: list[dict[str, any]], # 上下文，必传
              tool_schemas: list[dict[str, object]], # 工具说明，必传

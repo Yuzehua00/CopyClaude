@@ -4,6 +4,7 @@ import sys
 from copy_claude.cli.commands.version import cmd_version
 from copy_claude.cli.commands.ping import cmd_ping
 from copy_claude.cli.commands.run import cmd_run
+from copy_claude.cli.commands.trace import cmd_trace
 from copy_claude.core.config import get_config
 from copy_claude.core.logging_setup import setup_logging
 
@@ -25,6 +26,16 @@ def main() -> None:
     run_parser = subparsers.add_parser("run",help="运行llm规划并解决用户问题")
     run_parser.add_argument("--goal",required=True,help="用户提出的需求")
 
+
+    # trace部分的命令
+    trace_parser = subparsers.add_parser("trace",help="追踪内部信息流")
+    trace_parser.add_argument("run_id", nargs="?", default=None, help="通过run_id过滤信息流记录")
+    trace_parser.add_argument("--layer",choices=["ipc","event","llm"],help="根据层级类型追踪信息")
+    trace_parser.add_argument("--direction",
+                              choices=["CLIENT->CORE", "CORE->CLIENT","CORE","CORE->LLM","LLM->CORE"],
+                              help="根据信息流向追踪信息")
+    trace_parser.add_argument("--raw", action="store_true", help="输出行NDJSON")
+    trace_parser.add_argument("--follow", "-f", action="store_true", help="Follow new records")
     args = parser.parse_args() # args读取用户在命令行的设置
 
     if args.version: # 负责执行用户命令copyclaude --version，返回版本号
@@ -38,6 +49,15 @@ def main() -> None:
         cmd_ping(config)
     elif args.command == "run":
         cmd_run(args.goal,config) # 调起AgentLoop，终端输出显示，
+    elif args.command == "trace": # 这个命令是一个查询已trace文件的命令。并不涉及控制后端。
+        cmd_trace(
+            args.run_id,
+            config,
+            layer=args.layer,
+            direction=args.direction,
+            raw=args.raw,
+            follow=args.follow
+        )
     else:
         parser.print_help()
         sys.exit(1)

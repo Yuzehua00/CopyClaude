@@ -1,23 +1,26 @@
 import os
 import anthropic
 from typing import Any
-from copy_claude.core.llm.types import LlmResponse,ToolCallBlock
-from copy_claude.core.bus.events import LlmModelSelectedEvent,LlmTokenEvent
-from datetime import datetime,UTC
+from copy_claude.core.llm.types import LlmResponse, ToolCallBlock
+from copy_claude.core.bus.events import LlmModelSelectedEvent, LlmTokenEvent
+from datetime import datetime, UTC
 
-def _now()->str:
+
+def _now() -> str:
     return datetime.now(UTC).isoformat()
 
-_SYSTEM_PROMPT = ( # 系统基本人设
+
+_SYSTEM_PROMPT = (  # 系统基本人设
     "You are a helpful AI assistant.Your name is Ama01 or 凯尔希,You can call user as Doctor or 博士."
     "Use the available tools to complete the user's goal. "
     "When the goal is fully achieved, respond with a final answer and do not call any more tools."
 )
 
+
 class AnthropicProvider:
-    def __init__(self,model:str,client: Any = None)->None:
+    def __init__(self, model: str, client: Any = None) -> None:
         if client is None:
-            api_key = os.environ.get("ANTHROPIC_API_KEY") # 这是env中保留的api_key，在这里与llm产生联系。
+            api_key = os.environ.get("ANTHROPIC_API_KEY")  # 这是env中保留的api_key，在这里与llm产生联系。
             if not api_key:
                 raise SystemExit("ANTHROPIC_API_KEY not set")
             self._client: Any = anthropic.AsyncAnthropic(api_key=api_key)
@@ -25,12 +28,12 @@ class AnthropicProvider:
             self._client = client
         self._model = model
 
-    async def chat(self, messages, tool_schemas, bus, run_id,step:int = 0,system:Any|None = None) -> LlmResponse:
+    async def chat(self, messages, tool_schemas, bus, run_id, step: int = 0, system: Any | None = None) -> LlmResponse:
         # 告诉监听者用了哪个模型
         await bus.publish(LlmModelSelectedEvent(run_id=run_id, model=self._model, strategy="static", ts=_now()))
 
         # system prompt：告诉 LLM 它是谁、能做什么
-        system_blocks:list[dict[str,object]] = [
+        system_blocks: list[dict[str, object]] = [
             {"type": "text",
              "text": _SYSTEM_PROMPT,
              "cache_control": {"type": "ephemeral"}}
