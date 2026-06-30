@@ -10,7 +10,7 @@ def _now() -> str:
     return datetime.now(UTC).isoformat()
 
 
-_SYSTEM_PROMPT = (  # 系统基本人设
+SYSTEM_PROMPT = (  # 系统基本人设
     "You are a helpful AI assistant.Your name is Ama01 or 凯尔希,You can call user as Doctor or 博士."
     "Use the available tools to complete the user's goal. "
     "When the goal is fully achieved, respond with a final answer and do not call any more tools."
@@ -35,7 +35,7 @@ class AnthropicProvider:
         # system prompt：告诉 LLM 它是谁、能做什么
         system_blocks: list[dict[str, object]] = [
             {"type": "text",
-             "text": _SYSTEM_PROMPT,
+             "text": SYSTEM_PROMPT,
              "cache_control": {"type": "ephemeral"}}
         ]
 

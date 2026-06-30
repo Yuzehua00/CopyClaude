@@ -67,7 +67,7 @@ class SocketClient:
             if req_id and req_id in self._pending:
                 fut = self._pending.pop(req_id)
                 if "error" in msg:
-                    fut.set_exception(IpcError(msg["error"],msg["message"])) # fut设置字典为报错码和报错信息
+                    fut.set_exception(IpcError(msg["error"],msg.get("message",""))) # fut设置字典为报错码和报错信息
                     # 在这里有报错说明服务端已经发送了错误信息。
                 else:
                     fut.set_result(msg.get("result") or {})
@@ -75,7 +75,13 @@ class SocketClient:
             # 事件推送：调用所有注册的事件处理器
             event_data = msg.get("event", {})
             for handler in self._event_handlers:
-                await handler(event_data)
+                try:
+                    await handler(event_data)
+                except Exception as e:
+                    # 1. 打印到控制台，立即看到错误
+                    print(f"[EVENT BUS ERROR] Handler  failed for event {type(event_data).__name__}")
+                    print(f"Handler: {handler}")
+                    continue
 
     # 持续读取服务器消息，分发 RPC 响应到 pending future 或事件到 event handler
     async def run_event_loop(self):

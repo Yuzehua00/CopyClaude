@@ -8,6 +8,7 @@ from copy_claude.core.events.bus import EventBus,EventHandler
 from copy_claude.core.events.writer import EventWriter
 from copy_claude.core.llm.base import LLMProvider
 from copy_claude.core.llm.provider import AnthropicProvider
+from copy_claude.core.tools.builtin.note_save import NoteSaveTool
 from copy_claude.core.tools.registry import ToolRegistry
 from copy_claude.core.tools.builtin import (
 ReadFileTool,
@@ -25,6 +26,8 @@ from copy_claude.core.bus.events import RunFinishedEvent, RunStartedEvent
 from copy_claude.core.trace.writer import TraceWriter
 from copy_claude.core.trace.provider import TraceProvider
 from copy_claude.core.task.manager import TaskManager
+from copy_claude.core.session.model import Session
+from copy_claude.core.session.store import SessionStore
 from dataclasses import dataclass
 def _now() -> str:
     return datetime.now(UTC).isoformat()
@@ -56,7 +59,13 @@ class AgentRunner: # AgentRunner负责将AgentLoop需要的所有组件全都准
                   *,
                   run_id:str=None,)->None:
         await self.run_and_capture(goal,run_id=run_id)
-    def _build_registry(self,task_manager:TaskManager)->ToolRegistry:
+    def _build_registry(self,
+                        task_manager:TaskManager,
+                        *,
+                        session:Session|None=None,
+                        store:SessionStore|None=None,
+                        run_id:str|None=None
+                        )->ToolRegistry:
         registry = ToolRegistry()
         # 初始化一些工具：
         for t in [ReadFileTool(),WriteFileTool(),ListDirTool(),BashTool()]:
@@ -68,24 +77,39 @@ class AgentRunner: # AgentRunner负责将AgentLoop需要的所有组件全都准
             TaskGetTool(task_manager),
         ]:
             registry.register(t)
+        if session is not None and store is not None and run_id is not None:
+            registry.register(NoteSaveTool(store,session.id,run_id))
         return registry
     async def run_and_capture(self,
                   goal:str,
                   *,
-                  run_id:str|None=None,)->RunOutcome:
+                  run_id:str|None=None,
+                  session:Session|None = None,
+                  store:SessionStore|None = None)->RunOutcome:
         # 1对话记录前期准备，创建run_id并生成文件夹路径，便于存储信息。
         run_id = run_id or new_run_id()
-        run_path = self._runs_dir / run_id
+        if session is not None and store is not None:
+            run_path = store.runs_dir(session.id)/run_id
+            history = store.read_messages(session.id) # 放入上下文中
+            notes = store.read_notes(session.id) # 放入系统提示词中
+        else:
+            run_path = self._runs_dir/run_id
+            history = []
+            notes = ""
         run_path.mkdir(parents=True, exist_ok=True)
-        task_manager = TaskManager(run_path/".tasks")
-
+        prefill_len=len(history) # 旧信息的位置。
         # 2Agent循环开始前需要监听广播，所以应该实现监测器。
         # s1的监听者为EventWriter.handle，StdoutPrinter.handle，AgentRunner 传进来的 extra_handlers
+        task_manager = TaskManager(run_path/".tasks")
         bus = self._bus if self._bus is not None else EventBus()
         for h in self._extra_handlers:  # StdoutPrinter 从这里进来,stdoutPrinter是订阅者。发出者是这个bus
             bus.subscribe(h)
         # 4工作记忆，即对话记录
-        context = ExecutionContext(run_id=run_id, goal=goal, max_steps=self._config.agent.max_steps)
+        context = ExecutionContext(run_id=run_id,
+                                   goal=goal,
+                                   max_steps=self._config.agent.max_steps,
+                                   prefill_messages=history,
+                                   session_notes=notes)
         # 5将上下文事件记录的脚本开启。
         # 修改顺序，即使 LLM provider 初始化失败，客户端也已经收到了 run.started，而不是一直等待什么都不知道。
         async with EventWriter(run_path / "events.jsonl") as writer:
@@ -104,6 +128,8 @@ class AgentRunner: # AgentRunner负责将AgentLoop需要的所有组件全都准
                 cancelled = True # 触发了取消也不能直接raise。而是要给bus执行publish运行结束事件。
                 if not context.is_done():
                     context.mark_failed("cancelled")
+            if session is not None and store is not None:
+                store.append_messages(session.id, context.messages[prefill_len:], run_id=run_id)
             await bus.publish(RunFinishedEvent(run_id=run_id,
                                                status=context.status,
                                                steps=context.step,

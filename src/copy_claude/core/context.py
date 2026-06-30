@@ -1,22 +1,27 @@
 from __future__ import annotations
-from dataclasses import dataclass,field
-from typing import List,Any
+from dataclasses import dataclass, field
+from typing import List, Any
+
 
 @dataclass
-class ExecutionContext: # Agent记忆模块。聊天上下文,每次交互的时候都调用。
+class ExecutionContext:  # Agent记忆模块。聊天上下文,每次交互的时候都调用。
     run_id: str
     goal: str
     max_steps: int
+    prefill_messages:list[dict[str, Any]] = field(default_factory=list)
     messages: list[dict[str, Any]] = field(default_factory=list)
     # messages 是整个上下文最核心的部分。它的格式和 Anthropic API 要求的完全一致，涉及对话记录、思维链记录、工具调用记录
-    step: int = 0 # 当前步数
+    session_notes: str = field(default_factory=str)
+    step: int = 0  # 当前步数
     status: str = "running"  # "running" | "success" | "failed" ，决定是否运行
     reason: str | None = None
     result: str = ""
 
     def __post_init__(self) -> None:
         # goal 在初始化时自动变成第一条对话消息
-        if not self.messages:
+        if self.prefill_messages:
+            self.messages = [dict(m) for m in self.prefill_messages]
+        elif not self.messages:
             self.messages.append({"role": "user", "content": self.goal})
 
     def add_assistant_message(self, content: list[Any]) -> None:
@@ -29,11 +34,11 @@ class ExecutionContext: # Agent记忆模块。聊天上下文,每次交互的时
         if is_error:
             block["is_error"] = True
 
-        last = self.messages[-1] if len(self.messages) > 0 else None # 获取最后一条消息。
-        if (last # 最后一条消息存在
-            and last["role"]=="user" # 最后一条消息为user消息，对应工具结果为user消息追加。
-            and isinstance(last["content"], list) # 最后一条消息的content是列表
-            and all(b.get("type") == "tool_result" for b in last["content"])): # 最后一条消息的content中所有信息都是工具结果
+        last = self.messages[-1] if len(self.messages) > 0 else None  # 获取最后一条消息。
+        if (last  # 最后一条消息存在
+                and last["role"] == "user"  # 最后一条消息为user消息，对应工具结果为user消息追加。
+                and isinstance(last["content"], list)  # 最后一条消息的content是列表
+                and all(b.get("type") == "tool_result" for b in last["content"])):  # 最后一条消息的content中所有信息都是工具结果
             last["content"].append(block)
         else:
             self.messages.append({"role": "user", "content": [block]})
@@ -43,6 +48,19 @@ class ExecutionContext: # Agent记忆模块。聊天上下文,每次交互的时
 
     def mark_success(self) -> None:
         self.status = "success"
+
     def mark_failed(self, reason: str) -> None:
         self.status = "failed"
         self.reason = reason
+
+    def system_prompt(self,base:str) -> str:
+        # base 是基础提示词，如果存在session_notes就添加上，否则只返回原提示词
+        if self.session_notes is None:
+            return base
+        else:
+            return (
+                    base
+                    + "\n\n## Session Notes\n"
+                    + self.session_notes.strip()
+                    + "\n\nRemember important durable facts by calling note_save."
+            )

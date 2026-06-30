@@ -5,6 +5,7 @@ from copy_claude.cli.commands.version import cmd_version
 from copy_claude.cli.commands.ping import cmd_ping
 from copy_claude.cli.commands.run import cmd_run
 from copy_claude.cli.commands.trace import cmd_trace
+from copy_claude.cli.commands.chat import cmd_chat
 from copy_claude.core.config import get_config
 from copy_claude.core.logging_setup import setup_logging
 
@@ -49,6 +50,8 @@ def main() -> None:
         cmd_ping(config)
     elif args.command == "run":
         cmd_run(args.goal,config) # 调起AgentLoop，终端输出显示，
+    elif args.command == "chat":
+        cmd_chat(config)
     elif args.command == "trace": # 这个命令是一个查询已trace文件的命令。并不涉及控制后端。
         cmd_trace(
             args.run_id,

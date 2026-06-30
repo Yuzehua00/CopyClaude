@@ -2,6 +2,7 @@ from __future__ import annotations
 import asyncio
 
 from copy_claude.core.llm.base import LLMProvider
+from copy_claude.core.llm.provider import SYSTEM_PROMPT
 from copy_claude.core.tools.registry import ToolRegistry
 from copy_claude.core.events.bus import EventBus
 from copy_claude.core.context import ExecutionContext
@@ -11,7 +12,7 @@ from datetime import datetime,UTC
 
 def _now()->str:
     return datetime.now(UTC).isoformat()
-class AgentLoop:
+class AgentLoop: # 一句话的循环
     def __init__(self,provider:LLMProvider,registry:ToolRegistry,bus:EventBus) -> None:
         self._provider = provider # 类型检查实现chat方法的类，一般为anthropic的类，要传入env设置的环境变量的api_key
         self._registry = registry
@@ -28,6 +29,7 @@ class AgentLoop:
                     bus = self._bus,
                     run_id=context.run_id,
                     step=context.step,
+                    system=context.system_prompt(SYSTEM_PROMPT)
                 ) # 需要给大模型提供上下文messages和可用工具，run_id和bus事件。
             except asyncio.CancelledError:
                 context.mark_failed("cancelled") # 记录系统记录llm运行错误及原因。
