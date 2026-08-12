@@ -121,7 +121,9 @@ class SocketServer:
             line = await reader.readline()  # 挂起读程序的读行程序，一旦读到内容就恢复执行，继续向下走
             if not line:
                 return
-            await self._handle_line(line, writer)  # 挂起处理输入的程序，这个无限循环实现用户-Agent反复交互。
+            # 每条命令独立作为 task 执行，避免长时间运行的 handler（如 session.send_message）
+            # 阻塞读循环，使 permission.respond 等并发命令能被及时处理
+            asyncio.create_task(self._handle_line(line, writer))
 
     async def _handle_line(self, line: bytes, writer: asyncio.StreamWriter) -> None:
         # line是用户发来的信息字节形式，序列化，应该处理一下，得到结果用写程序写内容传回用户。

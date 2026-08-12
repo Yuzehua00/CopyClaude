@@ -112,6 +112,34 @@ class SessionClosedEvent(BaseModel):
     ts: str
 
 
+class PermissionRequestedEvent(BaseModel):
+    type: Literal["permission.requested"] = "permission.requested"
+    run_id: str
+    tool_use_id: str
+    tool_name: str
+    params: dict[str, Any]
+    param_preview: str
+    session_id: str
+    ts: str
+
+
+class PermissionGrantedEvent(BaseModel):
+    type: Literal["permission.granted"] = "permission.granted"
+    run_id: str
+    tool_use_id: str
+    # "allow_once" | "always_allow" | "auto_allow"
+    decision: str
+    ts: str
+
+
+class PermissionDeniedEvent(BaseModel):
+    type: Literal["permission.denied"] = "permission.denied"
+    run_id: str
+    tool_use_id: str
+    # "deny_once" | "always_deny" | "auto_deny"
+    decision: str
+    ts: str
+
 Event = Annotated[
     RunStartedEvent |
     RunFinishedEvent |
@@ -126,6 +154,9 @@ Event = Annotated[
     SessionResumedEvent |
     SessionReceivedMessageEvent |
     SessionWaitingForInputEvent |
-    SessionClosedEvent,
+    SessionClosedEvent|
+    PermissionRequestedEvent|
+    PermissionGrantedEvent|
+    PermissionDeniedEvent,
     Discriminator("type")
 ]

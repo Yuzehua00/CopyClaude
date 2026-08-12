@@ -14,7 +14,7 @@ from textual.css.query import NoMatches
 from textual.app import App, ComposeResult
 from textual.widget import Widget
 from textual.message import Message
-from textual.widgets import  Static, Label, TextArea
+from textual.widgets import Static, Label, TextArea
 
 from textual import events
 from copy_claude.core.transport.socket_client import SocketClient, IpcError
@@ -29,6 +29,151 @@ def _preview(s: str, n: int) -> str:
 
 def _params_str(params: dict[str, any]) -> str:
     return json.dumps(params, ensure_ascii=False)
+
+
+class PermissionBlock(Static):  # 这个块用来供用户选择。
+    _LABEL_MAP: dict[str, str] = {
+        "allow_once": "allowed (once)",
+        "always_allow": "always allowed",
+        "deny_once": "denied",
+        "always_deny": "always denied",
+        "timeout": "⏱ timed out",
+    }
+    LABEL_MAP = _LABEL_MAP
+
+    class Resolved(Message):
+        def __init__(self, block: PermissionBlock, decision: str) -> None:
+            self.block = block
+            self.decision = decision
+            super().__init__()
+
+    def __init__(self, tool_use_id: str,
+                 tool_name: str,
+                 param_preview: str) -> None:
+        self._tool_use_id = tool_use_id
+        self._tool_name = tool_name
+        self._param_preview = param_preview
+        self._resolved = False
+        super().__init__(self._pending_text(), classes="log-line")
+
+    def _pending_text(self) -> str:
+        preview = f"  [dim]{self._param_preview}[/dim]" if self._param_preview else ""
+        return f"[bold red]? permission[/bold red]  [bold]{self._tool_name}[/bold]{preview}"
+
+    def _resolve(self, decision: str) -> None:
+        if self._resolved:
+            return
+        self._resolved = True
+        allowed = decision in ("allow_once", "always_allow")
+        icon = "[bold green]✓[/bold green]" if allowed else "[bold red]✗[/bold red]"
+        label = self._LABEL_MAP.get(decision, decision)
+        preview = f"  [dim]{self._param_preview}[/dim]" if self._param_preview else ""
+        self.update(
+            f"{icon} permission  [bold]{self._tool_name}[/bold]{preview}  [dim]{label}[/dim]"
+        )
+        self.post_message(self.Resolved(self, decision))
+
+
+"""内联权限选择控件：挂载在日志流中，键盘焦点无需 ModalScreen。"""
+
+
+class PermissionSelect(Static):
+    can_focus = True
+    DEFAULT_CSS = """
+    PermissionSelect {
+        height: auto;
+        padding: 0 2;
+        margin-bottom: 1;
+    }
+    """
+    _CHOICES: tuple[tuple[str, str, str], ...] = (
+        ("allow_once", "Allow once", "y / 1"),
+        ("always_allow", "Always allow", "a / 2"),
+        ("deny_once", "Deny", "n / 3"),
+        ("always_deny", "Always deny", "d / 4"),
+    )
+    _KEY_MAP: dict[str, str] = {
+        "y": "allow_once", "1": "allow_once",
+        "a": "always_allow", "2": "always_allow",
+        "n": "deny_once", "3": "deny_once",
+        "d": "always_deny", "4": "always_deny",
+    }
+
+    # 用户作出权限决策时发布，携带工具 ID 和决策字符串
+    class Decided(Message):
+        # 初始化决策消息，存储控件引用、工具 ID 和决策
+        def __init__(self, widget: PermissionSelect, tool_use_id: str, decision: str) -> None:
+            self.widget = widget
+            self.tool_use_id = tool_use_id
+            self.decision = decision
+            super().__init__()
+
+    def __init__(self, tool_use_id: str, ):
+        super().__init__("")
+        self._tool_use_id = tool_use_id
+        self._cursor = 0
+
+    def on_mount(self) -> None:
+        self.update(self._render_ui())
+        self.focus()
+        log.debug(
+            "PermissionSelect.on_mount  can_focus=%s  focused_after=%r",
+            self.can_focus,
+            self.app.focused,
+        )
+        self.app.call_after_refresh(self._log_deferred_focus)
+
+    def _log_deferred_focus(self) -> None:
+        log.debug(
+            "PermissionSelect.deferred_focus  app.focused=%r  has_focus=%s  focusable=%s",
+            self.app.focused,
+            self.has_focus,
+            self.focusable,
+        )
+
+    # 焦点到达时记录，用于确认 focus() 是否真正生效
+    def on_focus(self, event: events.Focus) -> None:
+        log.debug("PermissionSelect.on_focus  has_focus=%s  app.focused=%r", self.has_focus, self.app.focused)
+
+    # 焦点离开时记录，用于追踪是否被其他控件抢走焦点
+    def on_blur(self, event: events.Blur) -> None:
+        log.debug("PermissionSelect.on_blur  app.focused=%r", self.app.focused)
+
+    def _render_ui(self) -> str:  # 光标对应哪个选项哪个选项就是亮的
+        lines: list[str] = []
+        for i, (_, label, key_hint) in enumerate(self._CHOICES):
+            if i == self._cursor:
+                lines.append(f"  [bold cyan]❯ {label}[/bold cyan]  [dim]{key_hint}[/dim]")
+            else:
+                lines.append(f"    {label}  [dim]{key_hint}[/dim]")
+        lines.append("[dim]  ↑↓ navigate   enter confirm[/dim]")
+        return "\n".join(lines)
+
+    # 方向键导航；快捷键直接选择；enter 确认光标位置
+    def on_key(self, event: events.Key) -> None:
+        log.debug("PermissionSelect.on_key  key=%r  char=%r", event.key, event.character)
+        key = event.key
+        if key in ("up", "k"):
+            event.stop()
+            self._cursor = (self._cursor - 1) % len(self._CHOICES)
+            self.update(self._render_ui())
+        elif key in ("down", "j"):
+            event.stop()
+            self._cursor = (self._cursor + 1) % len(self._CHOICES)
+            self.update(self._render_ui())
+        elif key == "enter":
+            event.stop()
+            self._pick(self._CHOICES[self._cursor][0])
+        else:
+            decision = self._KEY_MAP.get(key)
+            if decision is not None:
+                event.stop()
+                self._pick(decision)
+
+    # 发布决策消息，由宿主 App 负责 IPC 回复和控件清理
+    def _pick(self, decision: str) -> None:
+        log.debug("PermissionSelect._pick  decision=%s", decision)
+        self.post_message(self.Decided(self, self._tool_use_id, decision))
 
 
 class ChatTextArea(TextArea):
@@ -48,6 +193,7 @@ class ChatTextArea(TextArea):
             background: $background;
         }
         """
+
     class Submitted(Message):
         def __init__(self, area) -> None:
             self.area = area
@@ -110,7 +256,6 @@ class ToolCallBlock(Widget):
     def compose(self) -> ComposeResult:
         yield Static(self._summary(), classes="summary")
         yield Static("", classes="detail")
-        yield ChatTextArea(id="prompt", show_line_numbers=False)
 
     def _summary(self) -> str:  # 根据全文生成摘要。
         params_pre = _preview(self._params_full, 60)  # 全文的前缀。
@@ -169,6 +314,7 @@ class CopyClaudeTuiApp(App[None]):  # 这里也有处理事件的逻辑
 
     def __init__(self, host: str, port: int, replay_run_id: str | None = None) -> None:
         super().__init__()
+        self._pending_permission_blocks: dict[str, PermissionBlock] = {}
         self._host = host
         self._port = port
         self._replay_run_id = replay_run_id
@@ -190,7 +336,61 @@ class CopyClaudeTuiApp(App[None]):  # 这里也有处理事件的逻辑
         prompt.disabled = True
         prompt.border_title = "connecting..."
 
-    async def action_quit(self) -> None: # 退出时尝试将结果发给session，如果失败也不干预直接退出
+    def on_key(self, event: events.Key) -> None:
+        log.debug("App.on_key  key=%r  focused=%r", event.key, self.focused)
+        if not self._pending_permission_blocks:
+            return
+        try:
+            select = self.query_one(PermissionSelect)
+            if select.has_focus:
+                return  # PermissionSelect 有焦点时自行处理，事件不会冒泡到这里
+            key = event.key
+            decision = PermissionSelect._KEY_MAP.get(key)
+            if decision:
+                event.stop()
+                select._pick(decision)
+            elif key in ("up", "k"):
+                event.stop()
+                select._cursor = (select._cursor - 1) % len(PermissionSelect._CHOICES)
+                select.update(select._render_ui())
+            elif key in ("down", "j"):
+                event.stop()
+                select._cursor = (select._cursor + 1) % len(PermissionSelect._CHOICES)
+                select.update(select._render_ui())
+            elif key == "enter":
+                event.stop()
+                select._pick(PermissionSelect._CHOICES[select._cursor][0])
+        except Exception:
+            pass
+
+    async def on_permission_select_decided(self, msg: PermissionSelect.Decided) -> None:
+        tool_use_id = msg.tool_use_id
+        decision = msg.decision
+        log.info("permission decided tool_use_id=%s decision=%s", tool_use_id, decision)
+        try:
+            msg.widget.remove()
+            perm_block = self._pending_permission_blocks.pop(tool_use_id, None)
+            if perm_block is not None:
+                perm_block._resolve(decision)
+            if self._client is not None:
+                try:
+                    await self._client.send_command(
+                        "permission.respond",
+                        {"tool_use_id": tool_use_id, "decision": decision},
+                    )
+                except (IpcError, RuntimeError, OSError):
+                    pass
+            if not self._pending_permission_blocks:
+                p = self._prompt()
+                if p is not None:
+                    p.disabled = False
+                    p.read_only = False
+                    p.border_title = "type a message — enter to send, ⌘/⇧/⌥+enter for newline"
+                    p.focus()
+        except Exception:
+            log.exception("on_permission_select_decided failed tool_use_id=%s", tool_use_id)
+
+    async def action_quit(self) -> None:  # 退出时尝试将结果发给session，如果失败也不干预直接退出
         if self._client is not None and self._session_id is not None:
             try:
                 await self._client.send_command("session.close", {"session_id": self._session_id})
@@ -198,7 +398,7 @@ class CopyClaudeTuiApp(App[None]):  # 这里也有处理事件的逻辑
                 self._append(Static("[yellow]warning: failed to close session[/yellow]"))
         self.exit()
 
-    async def _do_send_message(self, content:str) -> None:
+    async def _do_send_message(self, content: str) -> None:
         if self._client is None:
             return
         try:
@@ -213,8 +413,9 @@ class CopyClaudeTuiApp(App[None]):  # 这里也有处理事件的逻辑
             prompt.border_title = "type a message — enter to send, ⌘/⇧/⌥+enter for newline"
             self._update_header("ready")
             self._append(Static(f"[red]send error: {e}[/red]", classes="log-line"))
+
     # 将输入框提交内容发送给当前 chat session
-    async def on_chat_text_area_submitted(self,event:ChatTextArea.Submitted)->None:
+    async def on_chat_text_area_submitted(self, event: ChatTextArea.Submitted) -> None:
         # 你定义的事件类：ChatTextArea.Submitted要与名字对齐。
         content = event.value.strip()
         if not content:
@@ -253,8 +454,10 @@ class CopyClaudeTuiApp(App[None]):  # 这里也有处理事件的逻辑
             # 端口连接成功需要展示在标题：传入状态位
             self._update_header("connecting")
             loop_task = asyncio.create_task(client.run_event_loop())  # 事件循环是为了持续的读取来自服务器的信息并进行分发。
-            async def on_event(event: dict[str, Any]) -> None: # 异步函数改成同步函数的路由了，因此额外套一层异步的皮
+
+            async def on_event(event: dict[str, Any]) -> None:  # 异步函数改成同步函数的路由了，因此额外套一层异步的皮
                 self._handle_event(event)
+
             client.on_event(on_event)
             try:
                 params: dict[str, Any] = {
@@ -266,6 +469,7 @@ class CopyClaudeTuiApp(App[None]):  # 这里也有处理事件的逻辑
                         "llm.token",
                         "llm.usage",
                         "log.*",
+                        "permission.*",
                     ],
                     "scope": "global",
                 }
@@ -279,7 +483,7 @@ class CopyClaudeTuiApp(App[None]):  # 这里也有处理事件的逻辑
                     prompt.disabled = False
                     prompt.border_title = "type a message — enter to send, ⌘/⇧/⌥+enter for newline"
                     prompt.focus()
-                self._update_header("ready") # 没走到这里
+                self._update_header("ready")  # 没走到这里
                 await loop_task
             except IpcError as e:
                 header.update(f"[bold]CopyClaude[/bold]  [red]subscribe error: {e}[/red]")
@@ -303,6 +507,10 @@ class CopyClaudeTuiApp(App[None]):  # 这里也有处理事件的逻辑
             return self.query_one("#prompt", ChatTextArea)
         except NoMatches:
             return None
+
+    # 将选择控件挂载到 Screen 顶层（#prompt 之前），避免 VerticalScroll 争抢焦点
+    def _mount_permission_select(self, select: PermissionSelect) -> None:  # 把控件放在最前面。
+        self.mount(select, before="#prompt")
 
     def _handle_event(self, event: dict[str, Any]) -> None:
         t = event.get("type", "")
@@ -407,7 +615,48 @@ class CopyClaudeTuiApp(App[None]):  # 这里也有处理事件的逻辑
                 f"[dim]{event.get('source', '')}[/dim]  {event.get('message', '')}",
                 classes="log-line",
             ))
-
+        elif t == "permission.requested":
+            tool_use_id = str(event.get("tool_use_id", ""))
+            tool_name = str(event.get("tool_name", ""))
+            param_preview = str(event.get("param_preview", ""))
+            try:
+                _focused_repr = repr(self.focused)
+            except Exception:
+                _focused_repr = "?"
+            log.info(
+                "permission.requested tool=%s id=%s  app.focused=%s",
+                tool_name, tool_use_id, _focused_repr,
+            )
+            perm_block = PermissionBlock(tool_use_id, tool_name, param_preview)
+            self._pending_permission_blocks[tool_use_id] = perm_block
+            prompt = self._prompt()
+            if prompt is not None:
+                prompt.disabled = True
+                prompt.border_title = "permission required"
+            self._append(perm_block)
+            select = PermissionSelect(tool_use_id)
+            self._mount_permission_select(select)
+            log.debug("PermissionSelect mounted before #prompt  pending=%d", len(self._pending_permission_blocks))
+        elif t == "permission.denied":
+            # 处理超时或断连等非用户交互触发的 deny（用户主动 deny 已由 on_permission_select_decided 处理）
+            tool_use_id = str(event.get("tool_use_id", ""))
+            decision = str(event.get("decision", "denied"))
+            if tool_use_id in self._pending_permission_blocks:
+                perm_block = self._pending_permission_blocks.pop(tool_use_id, None)
+                if perm_block is not None:
+                    perm_block._resolve(decision)
+                try:
+                    select = self.query_one(PermissionSelect)
+                    select.remove()
+                except Exception:
+                    pass
+                if not self._pending_permission_blocks:
+                    p = self._prompt()
+                    if p is not None:
+                        p.disabled = False
+                        p.read_only = False
+                        p.border_title = "type a message — enter to send, ⌘/⇧/⌥+enter for newline"
+                        p.focus()
     # def _handle_event_inner(self, event: dict[str, Any]) -> None:
     #     event_type = event.get("type")
     #
@@ -438,8 +687,8 @@ class CopyClaudeTuiApp(App[None]):  # 这里也有处理事件的逻辑
         log_view.mount(widget)
         log_view.scroll_end(animate=False)
 
-    def _update_header(self, state:str)->None:
-        try: # 确认header是否存在，如不存在直接返回
+    def _update_header(self, state: str) -> None:
+        try:  # 确认header是否存在，如不存在直接返回
             header = self.query_one("#header", Label)
         except NoMatches:
             return

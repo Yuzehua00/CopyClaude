@@ -10,7 +10,7 @@ from pydantic import BaseModel
 from datetime import datetime, UTC
 # 后端的核心，接收cli的请求并返回信息。
 from copy_claude.core.config import CopyClaudeConfig, get_config
-from copy_claude.core.bus.commands import ( # Command添加session创建和session发送信息的结构体
+from copy_claude.core.bus.commands import (  # Command添加session创建和session发送信息的结构体
     PingCommand,
     PongResult,
     EventSubscribeCommand,
@@ -24,11 +24,12 @@ from copy_claude.core.bus.commands import ( # Command添加session创建和sessi
     SessionGetHistoryCommand,
     SessionGetHistoryResult,
     SessionCloseCommand,
-    SessionCloseResult
+    SessionCloseResult, PermissionRespondCommand, PermissionRespondResult
 )
 from copy_claude.core.bus.envelope import EventPushEnvelope
 from copy_claude.core.llm.provider import AnthropicProvider
 from copy_claude.core.logging_setup import setup_logging
+from copy_claude.core.permission.manager import PermissionManager
 from copy_claude.core.session.store import SessionStore
 from copy_claude.core.transport.socket_server import SocketServer, get_connection_writer
 from copy_claude.core.events.bus import EventBus
@@ -60,6 +61,7 @@ class CoreApp:  # 所有用户的命令处理器都在这里定义，真正的�
         self._running_runs: set[asyncio.Task[None]] = set()
         self._trace: TraceWriter | None = None
         self._sessions:SessionManager|None = None
+        self._permission_manager: PermissionManager|None = None
 
     async def _ping_handler(self, params: Dict[str:Any]) -> PongResult:  # 处理ping命令
         cmd = PingCommand.model_validate(params)  # 此种语境下传过来的是PingCommand
@@ -131,6 +133,11 @@ class CoreApp:  # 所有用户的命令处理器都在这里定义，真正的�
         await self._sessions.close(cmd.session_id)
         return SessionCloseResult(status=cmd.status)
 
+    async def _permission_respond_handler(self, params):
+        assert self._permission_manager is not None
+        cmd = PermissionRespondCommand.model_validate(params)
+        self._permission_manager.respond(cmd.tool_use_id, cmd.decision)
+        return PermissionRespondResult()
 
 
     async def _replay_events(self,
@@ -177,6 +184,11 @@ class CoreApp:  # 所有用户的命令处理器都在这里定义，真正的�
         compact_provider = AnthropicProvider(self._config.llm.default_model)
         sessions_root = Path("~/.copyclaude/sessions").expanduser()
         store = SessionStore(sessions_root)
+        policy_file = Path("~/.kama/policy.toml").expanduser()
+        self._permission_manager = PermissionManager(
+            policy_file=policy_file,
+            timeout_s=self._config.permission.timeout_s,
+        )
         if self._config.trace.enabled: # 设置允许追踪
             trace_path = Path(self._config.trace.file).expanduser()
             self._trace = TraceWriter(trace_path)
@@ -189,6 +201,7 @@ class CoreApp:  # 所有用户的命令处理器都在这里定义，真正的�
                 self._config,  # type: ignore[arg-type]
                 bus=self._bus,
                 trace=self._trace,
+                permission_manager=self._permission_manager,
             ),
             bus=self._bus,
             provider=compact_provider,
@@ -202,6 +215,7 @@ class CoreApp:  # 所有用户的命令处理器都在这里定义，真正的�
         server.register("session.send_message", self._session_send_message_handler)
         server.register("session.get_history", self._session_history_handler)
         server.register("session.close", self._session_close_handler)
+        server.register("permission.respond", self._permission_respond_handler)
         # S3广播器追加trace
         self._broadcaster = IpcEventBroadcaster(trace=self._trace)
         self._bus.subscribe(self._broadcaster.handle)

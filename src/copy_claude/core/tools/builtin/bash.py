@@ -1,14 +1,21 @@
 from __future__ import annotations
 
 import asyncio
-
+from pydantic import BaseModel, Field, ConfigDict
 from copy_claude.core.tools.base import ToolResult, BaseTool
 
 _MAX_OUTPUT_BYTES = 64 * 1024  # 64 KB
 _DEFAULT_TIMEOUT = 60
 
 
-class BashTool(BaseTool): # 把大模型生成的shell指令交给subprocess_shell执行。
+class BashParams(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    command: str
+    timeout: int = Field(default=60, ge=1, le=120)
+
+
+class BashTool(BaseTool):  # 把大模型生成的shell指令交给subprocess_shell执行。bash命令是一个危险道具，需要权限检查。
+    params_model = BashParams
     name = "bash"
     description = (
         "Execute a shell command and return its output (stdout + stderr combined). "
@@ -35,8 +42,9 @@ class BashTool(BaseTool): # 把大模型生成的shell指令交给subprocess_she
     }
 
     async def invoke(self, params: dict[str, object]) -> ToolResult:  # params对应properties
-        command = str(params["command"])  # command字段一定有，但timeout字段不一定有
-        timeout = min(int(str(params.get("timeout", _DEFAULT_TIMEOUT))), 120)
+        p = BashParams.model_validate(params)
+        command = p.command
+        timeout = p.timeout
         try:
             proc = await asyncio.create_subprocess_shell(
                 cmd=command,
@@ -44,17 +52,17 @@ class BashTool(BaseTool): # 把大模型生成的shell指令交给subprocess_she
                 stderr=asyncio.subprocess.STDOUT,
             )
             try:
-                stdout_bytes,_ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+                stdout_bytes, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
             except asyncio.TimeoutError:
                 proc.kill()
                 await proc.communicate()
-                return ToolResult(content=f"[timeout after {timeout}s]",is_error=True,error_type="timeout")
+                return ToolResult(content=f"[timeout after {timeout}s]", is_error=True, error_type="timeout")
         except Exception as exc:
-            return ToolResult(content=f"[command failed:{exc}]",is_error=True,error_type="runtime_error")
+            return ToolResult(content=f"[command failed:{exc}]", is_error=True, error_type="runtime_error")
 
-        output = stdout_bytes.decode("utf-8",errors="replace") # 字节解码成中文
+        output = stdout_bytes.decode("utf-8", errors="replace")  # 字节解码成中文
 
-        truncated = len(stdout_bytes) > _MAX_OUTPUT_BYTES # 截断应该对比字节而非解码后的内容
+        truncated = len(stdout_bytes) > _MAX_OUTPUT_BYTES  # 截断应该对比字节而非解码后的内容
         if truncated:
             output = output[:_MAX_OUTPUT_BYTES] + "\n[truncated]"
 
@@ -66,4 +74,3 @@ class BashTool(BaseTool): # 把大模型生成的shell指令交给subprocess_she
                 error_type="runtime_error",
             )
         return ToolResult(content=output or "[no output]")
-
