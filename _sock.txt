@@ -1,0 +1,76 @@
+  480:     async def _socket_loop(self):
+  481:         header = self.query_one("#header", Label)
+  482:         while True:
+  483:             client = SocketClient(self._host, self._port)
+  484:             self._client = None
+  485:             try:
+  486:                 await client.connect()
+  487:             except (ConnectionRefusedError, OSError):
+  488:                 self._update_header("disconnected")
+  489:                 await asyncio.sleep(2)
+  490:                 continue
+  491:             self._client = client
+  492:             # 端口连接成功需要展示在标题：传入状态位
+  493:             self._update_header("connecting")
+  494:             loop_task = asyncio.create_task(client.run_event_loop())  # 事件循环是为了持续的读取来自服务器的信息并进行分发。
+  495: 
+  496:             async def on_event(event: dict[str, Any]) -> None:  # 异步函数改成同步函数的路由了，因此额外套一层异步的皮
+  497:                 self._handle_event(event)
+  498: 
+  499:             client.on_event(on_event)
+  500:             try:
+  501:                 params: dict[str, Any] = {
+  502:                     "topics": [
+  503:                         "session.*",
+  504:                         "run.*",
+  505:                         "step.*",
+  506:                         "tool.*",
+  507:                         "llm.token",
+  508:                         "llm.usage",
+  509:                         "log.*",
+  510:                         "permission.*",
+  511:                     ],
+  512:                     "scope": "global",
+  513:                 }
+  514:                 if self._replay_run_id is not None:
+  515:                     params["replay_from_run"] = self._replay_run_id
+  516:                 await client.send_command(method="event.subscribe", params=params)
+  517:                 created = await client.send_command("session.create", {"mode": "chat"})
+  518:                 self._session_id = str(created["session_id"])
+  519:                 prompt = self._prompt()
+  520:                 if prompt is not None:
+  521:                     prompt.disabled = False
+  522:                     prompt.border_title = "type a message — enter to send, ⌘/⇧/⌥+enter for newline"
+  523:                     prompt.focus()
+  524:                 self._update_header("ready")  # 没走到这里
+  525:                 await loop_task
+  526:             except IpcError as e:
+  527:                 header.update(f"[bold]CopyClaude[/bold]  [red]subscribe error: {e}[/red]")
+  528:             finally:
+  529:                 if not loop_task.done():
+  530:                     loop_task.cancel()
+  531:                 self._client = None
+  532:                 self._session_id = None
+  533:                 prompt = self._prompt()
+  534:                 if prompt is not None:
+  535:                     prompt.disabled = True
+  536:                     prompt.border_title = "disconnected, retrying..."
+  537:                 self._break_llm()
+  538:                 await client.close()
+  539:             self._update_header("disconnected")
+  540:             await asyncio.sleep(2)
+  541: 
+  542:     # 安全获取输入框，便于组件测试中未挂载时跳过 UI 操作
+  543:     def _prompt(self) -> ChatTextArea | None:
+  544:         try:
+  545:             return self.query_one("#prompt", ChatTextArea)
+  546:         except NoMatches:
+  547:             return None
+  548: 
+  549:     # 将选择控件挂载到 Screen 顶层（#prompt 之前），避免 VerticalScroll 争抢焦点
+  550:     def _mount_permission_select(self, select: PermissionSelect) -> None:  # 把控件放在最前面。
+  551:         self.mount(select, before="#prompt")
+  552: 
+  553:     def _handle_event(self, event: dict[str, Any]) -> None:
+  554:         t = event.get("type", "")
+  555: 

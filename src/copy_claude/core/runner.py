@@ -2,6 +2,8 @@ import asyncio
 from typing import Any, List
 from pathlib import Path
 from datetime import datetime, UTC
+
+from copy_claude.core.compact.compactor import Compactor
 from copy_claude.core.config import CopyClaudeConfig
 from copy_claude.core.permission.manager import PermissionManager
 from copy_claude.core.runs import new_run_id, RUNS_DIR
@@ -29,6 +31,7 @@ from copy_claude.core.trace.provider import TraceProvider
 from copy_claude.core.task.manager import TaskManager
 from copy_claude.core.session.model import Session
 from copy_claude.core.session.store import SessionStore
+from copy_claude.core.memory.loader import load_context_file
 from dataclasses import dataclass
 
 
@@ -108,6 +111,9 @@ class AgentRunner:  # AgentRunner负责将AgentLoop需要的所有组件全都�
             run_path = self._runs_dir / run_id
             history = []
             notes = ""
+        global_ctx = load_context_file(Path("~/.copyclaude/context.md").expanduser())
+        project_ctx = load_context_file(Path(".copyclaude/context.md"))
+        # S6上述两个上下文分别是全局级记忆和项目级记忆。
         session_id_str = session.id if session is not None else ""
 
         run_path.mkdir(parents=True, exist_ok=True)
@@ -118,12 +124,14 @@ class AgentRunner:  # AgentRunner负责将AgentLoop需要的所有组件全都�
         bus = self._bus if self._bus is not None else EventBus()
         for h in self._extra_handlers:  # StdoutPrinter 从这里进来,stdoutPrinter是订阅者。发出者是这个bus
             bus.subscribe(h)
-        # 4工作记忆，即对话记录
+        # 4工作记忆，即对话记录，S6：全局上下文和项目级上下文应该添加进来
         context = ExecutionContext(run_id=run_id,
                                    goal=goal,
                                    max_steps=self._config.agent.max_steps,
                                    prefill_messages=history,
-                                   session_notes=notes)
+                                   session_notes=notes,
+                                   global_context=global_ctx,
+                                   project_context=project_ctx)
         # 5将上下文事件记录的脚本开启。
         # 修改顺序，即使 LLM provider 初始化失败，客户端也已经收到了 run.started，而不是一直等待什么都不知道。
         async with EventWriter(run_path / "events.jsonl") as writer:
@@ -133,13 +141,18 @@ class AgentRunner:  # AgentRunner负责将AgentLoop需要的所有组件全都�
             try:
                 # 3正式循环，需要llm（provider）,工具箱，循环控制器
                 registry = self._build_registry(task_manager)
-                provider = self._provider or AnthropicProvider(self._config.llm.default_model)  # provider为后者
+                provider = self._provider or AnthropicProvider(model=self._config.llm.default_model)  # provider为后者
                 if self._trace is not None:
                     provider = TraceProvider(self._trace, provider,
                                              include_payload=self._config.trace.include_llm_payload, )
+                session_dir = store.session_dir(session.id) if session is not None and store is not None else run_path
+                session_id_str = session.id if session is not None else ""
+                compactor = Compactor(bus, session_dir, session_id_str)
                 loop = AgentLoop(provider, registry, bus,
                                  permission_manager=self._permission_manager
-                                 , session_id=session_id_str)
+                                 , session_id=session_id_str,
+                                 compactor=compactor,
+                                 compact_threshold=self._config.compaction.auto_threshold)
                 await loop.run(context)
             except asyncio.CancelledError:
                 cancelled = True  # 触发了取消也不能直接raise。而是要给bus执行publish运行结束事件。

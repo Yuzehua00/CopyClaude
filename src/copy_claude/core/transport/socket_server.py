@@ -163,6 +163,9 @@ class SocketServer:
         try:  # 新加的内容
             _writer_var.set(writer)  # 在协程上下文中存储writer，就可以用函数get_connection_writer函数中得到它。
             result = await handler(req.params)  # 在调用协程前存储信息。
+        except HandlerError as e:
+            await self._send(writer, make_error(req.id, e.code, str(e), e.data))
+            return
         except ValidationError as e:
             await self._send(writer, make_error(req.id, INVALID_PARAMS, "Invalid params", str(e)))
             return

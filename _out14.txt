@@ -1,0 +1,70 @@
+  121:     # 持续读取换行分隔的 JSON 行并逐行分发处理
+  122:     async def _read_loop(
+  123:         self,
+  124:         reader: asyncio.StreamReader,
+  125:         writer: asyncio.StreamWriter,
+  126:     ) -> None:
+  127:         while True:
+  128:             try:
+  129:                 line = await reader.readline()
+  130:             except asyncio.LimitOverrunError:
+  131:                 await self._send(writer, make_error(None, INVALID_REQUEST, "Request too large"))
+  132:                 return
+  133: 
+  134:             if not line:
+  135:                 return
+  136: 
+  137:             # 每条命令独立作为 task 执行，避免长时间运行的 handler（如 session.send_message）
+  138:             # 阻塞读循环，使 permission.respond 等并发命令能被及时处理
+  139:             asyncio.create_task(self._handle_line(line, writer))
+  140: 
+  141: 
+  142:     # 解析单行 JSON-RPC 请求并调用对应 handler，将结果或错误写回客户端
+  143:     async def _handle_line(self, line: bytes, writer: asyncio.StreamWriter) -> None:
+  144:         try:
+  145:             raw: Any = json.loads(line)
+  146:         except json.JSONDecodeError as e:
+  147:             await self._send(writer, make_error(None, PARSE_ERROR, f"Parse error: {e}"))
+  148:             return
+  149: 
+  150:         try:
+  151:             req = JsonRpcRequest.model_validate(raw)
+  152:         except ValidationError as e:
+  153:             await self._send(writer, make_error(None, INVALID_REQUEST, "Invalid Request", str(e)))
+  154:             return
+  155: 
+  156:         if self._trace is not None:
+  157:             client_id = str(writer.get_extra_info("peername", "<unknown>"))
+  158:             self._trace.emit(
+  159:                 TraceRecord(
+  160:                     ts=_now(),
+  161:                     direction="CLIENT→CORE",
+  162:                     layer="ipc",
+  163:                     kind="command",
+  164:                     client_id=client_id,
+  165:                     data={"method": req.method, "id": req.id, "params": req.params},
+  166:                 )
+  167:             )
+  168: 
+  169:         handler = self._handlers.get(req.method)
+  170:         if handler is None:
+  171:             await self._send(
+  172:                 writer,
+  173:                 make_error(req.id, METHOD_NOT_FOUND, f"Method not found: {req.method}"),
+  174:             )
+  175:             return
+  176: 
+  177:         _writer_var.set(writer)
+  178:         try:
+  179:             result = await handler(req.params)
+  180:         except HandlerError as e:
+  181:             await self._send(writer, make_error(req.id, e.code, str(e), e.data))
+  182:             return
+  183:         except ValidationError as e:
+  184:             await self._send(
+  185:                 writer,
+  186:                 make_error(req.id, INVALID_REQUEST, "Invalid params", str(e)),
+  187:             )
+  188:             return
+  189:         except Exception as e:
+  190:             logger.exception("handler %s raised: %s", req.method, e)

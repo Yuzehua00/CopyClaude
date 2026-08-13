@@ -41,6 +41,7 @@ class ToolCallFinishedEvent(BaseModel):
     tool_use_id: str
     tool_name: str
     elapsed_ms: int
+    output: str = ""
     ts: str
 
 
@@ -100,7 +101,7 @@ class SessionReceivedMessageEvent(BaseModel):
 
 
 class SessionWaitingForInputEvent(BaseModel):
-    type: Literal["session.send_message"] = "session.waiting_for_input"
+    type: Literal["session.waiting_for_input"] = "session.waiting_for_input"
     session_id: str
     last_run_id: str
     ts: str
@@ -140,6 +141,24 @@ class PermissionDeniedEvent(BaseModel):
     decision: str
     ts: str
 
+
+class LlmUsageEvent(BaseModel):
+    type: Literal["llm.usage"] = "llm.usage"
+    run_id: str
+    input_tokens: int
+    output_tokens: int
+    cache_read_input_tokens: int
+    cache_creation_input_tokens: int
+    context_pct: float
+    ts: str
+class ContextCompactedEvent(BaseModel):
+    type: Literal["context.compacted"] = "context.compacted"
+    session_id: str
+    run_id: str
+    original_tokens:int
+    summary_tokens:int
+    ts:str
+
 Event = Annotated[
     RunStartedEvent |
     RunFinishedEvent |
@@ -154,9 +173,11 @@ Event = Annotated[
     SessionResumedEvent |
     SessionReceivedMessageEvent |
     SessionWaitingForInputEvent |
-    SessionClosedEvent|
-    PermissionRequestedEvent|
-    PermissionGrantedEvent|
-    PermissionDeniedEvent,
+    SessionClosedEvent |
+    PermissionRequestedEvent |
+    PermissionGrantedEvent |
+    PermissionDeniedEvent |
+    LlmUsageEvent |
+    ContextCompactedEvent,
     Discriminator("type")
 ]

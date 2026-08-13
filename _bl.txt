@@ -1,0 +1,5 @@
+  537:                 self._break_llm()
+  553:     def _handle_event(self, event: dict[str, Any]) -> None:
+  565:         self._break_llm()
+  708:     def _break_llm(self) -> None:
+  718:     def _update_header(self, state: str) -> None:

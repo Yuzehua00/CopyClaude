@@ -1,0 +1,30 @@
+  186:             background: $background;
+  187:             padding: 0 1;
+  188:             margin: 1 2;
+  189:             scrollbar-size-vertical: 1;
+  190:         }
+  191:         ChatTextArea:focus {
+  192:             border: round $accent;
+  193:             background: $background;
+  194:         }
+  195:         """
+  196: 
+  197:     class Submitted(Message):
+  198:         def __init__(self, area) -> None:
+  199:             self.area = area
+  200:             self.value = area.text
+  201:             super().__init__()
+  202: 
+  203:     async def _on_key(self, event: events.Key) -> None:
+  204:         key = event.key
+  205:         if key == "enter":
+  206:             event.stop()
+  207:             event.prevent_default()
+  208:             if self.text.strip():
+  209:                 self.post_message(self.Submitted(self))
+  210:             return
+  211:         if key in ("alt+enter", "shift+enter", "ctrl+j", "super+enter"):
+  212:             event.stop()
+  213:             event.prevent_default()
+  214:             if not self.read_only:
+  215:                 self.insert("\n")

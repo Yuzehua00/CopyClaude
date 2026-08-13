@@ -1,0 +1,95 @@
+  151:     async def _session_close_handler(self, params: dict[str, Any]) -> SessionCloseResult:
+  152:         assert self._sessions is not None
+  153:         cmd = SessionCloseCommand.model_validate(params)
+  154:         await self._sessions.close(cmd.session_id)
+  155:         return SessionCloseResult(status="closed")
+  156: 
+  157:     # 注册客户端事件订阅，可选先回放 events.jsonl 历史再接收实时流
+  158:     async def _subscribe_handler(self, params: dict[str, Any]) -> EventSubscribeResult:
+  159:         cmd = EventSubscribeCommand.model_validate(params)
+  160:         writer = get_connection_writer()
+  161: 
+  162:         replayed_count = 0
+  163:         if cmd.replay_from_run is not None:
+  164:             replayed_count = await self._replay_events(
+  165:                 cmd.replay_from_run, writer, cmd.topics
+  166:             )
+  167: 
+  168:         assert self._broadcaster is not None
+  169:         sub_id = self._broadcaster.subscribe(writer, cmd.topics, cmd.scope)
+  170:         return EventSubscribeResult(subscription_id=sub_id, replayed_count=replayed_count)
+  171: 
+  172:     # 从 events.jsonl 向 writer 回放匹配 topic 的历史事件，返回已回放条数
+  173:     async def _replay_events(
+  174:         self,
+  175:         run_id: str,
+  176:         writer: asyncio.StreamWriter,
+  177:         topics: list[str],
+  178:     ) -> int:
+  179:         path = events_file(run_id) # 根据run_id获取事件文件路径event_json。
+  180:         if not path.exists(): # 路径不存在就去C盘精确匹配。
+  181:             for candidate in Path("~/.kama/sessions").expanduser().glob(
+  182:                 f"*/runs/{run_id}/events.jsonl"
+  183:             ):
+  184:                 path = candidate
+  185:                 break
+  186:         if not path.exists(): # 匹配未成功则返回。
+  187:             return 0
+  188: 
+  189:         count = 0
+  190:         for line in path.read_text().splitlines(): # 按行读取文件
+  191:             if not line:
+  192:                 continue
+  193:             try:
+  194:                 event = json.loads(line)
+  195:             except json.JSONDecodeError:
+  196:                 continue
+  197:             event_type: str = event.get("type", "")
+  198:             if not any(fnmatch.fnmatch(event_type, p) for p in topics):
+  199:                 continue
+  200:             envelope = EventPushEnvelope(event=event)
+  201:             writer.write(envelope.model_dump_json().encode() + b"\n")
+  202:             count += 1
+  203: 
+  204:         if count:
+  205:             await writer.drain()
+  206:         return count
+  207: 
+  208:     # 启动守护进程：加载配置、初始化日志、启动 trace、启动 TCP 服务器，并等待退出信号
+  209:     async def run(self) -> None:
+  210:         self._start_time = time.monotonic()
+  211:         self._config = get_config()
+  212:         setup_logging(self._config)
+  213:         if self._config.trace.enabled:
+  214:             trace_path = Path(self._config.trace.file).expanduser()
+  215:             self._trace = TraceWriter(trace_path)
+  216:             await self._trace.start()
+  217:             self._bus.subscribe(self._trace_event_handler)
+  218: 
+  219:         policy_file = Path("~/.kama/policy.toml").expanduser()
+  220:         self._permission_manager = PermissionManager(
+  221:             policy_file=policy_file,
+  222:             timeout_s=self._config.permission.timeout_s,
+  223:         )
+  224:         logger.info(
+  225:             "permission manager: timeout_s=%.1f  persistent=%d entries",
+  226:             self._config.permission.timeout_s,
+  227:             len(load_policy_file(policy_file)),
+  228:         )
+  229: 
+  230:         self._broadcaster = IpcEventBroadcaster(trace=self._trace)
+  231:         self._bus.subscribe(self._broadcaster.handle)
+  232:         sessions_root = Path("~/.kama/sessions").expanduser()
+  233:         store = SessionStore(sessions_root)
+  234:         assert self._config is not None
+  235:         compact_provider = AnthropicProvider(self._config.llm.default_model)
+  236: 
+  237:         self._mcp_manager = McpServerManager()
+  238:         if self._config.mcp.servers:
+  239:             logger.info("mcp: starting %d server(s)", len(self._config.mcp.servers))
+  240:             await self._mcp_manager.start_all(self._config.mcp.servers)
+  241: 
+  242:         self._sessions = SessionManager(
+  243:             store,
+  244:             runner_factory=lambda: AgentRunner(
+  245:                 self._config,  # type: ignore[arg-type]

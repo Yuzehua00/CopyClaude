@@ -1,0 +1,81 @@
+    1:     DEFAULT_CSS = """
+    2:         ChatTextArea {
+    3:             height: auto;
+    4:             min-height: 3;
+    5:             max-height: 12;
+    6:             border: round $surface-lighten-2;
+    7:             background: $background;
+    8:             padding: 0 1;
+    9:             margin: 1 2;
+   10:             scrollbar-size-vertical: 1;
+   11:         }
+   12:         ChatTextArea:focus {
+   13:             border: round $accent;
+   14:             background: $background;
+   15:         }
+   16:         """
+   17: 
+   18:     class Submitted(Message):
+   19:         def __init__(self, area) -> None:
+   20:             self.area = area
+   21:             self.value = area.text
+   22:             super().__init__()
+   23: 
+   24:     async def _on_key(self, event: events.Key) -> None:
+   25:         key = event.key
+   26:         if key == "enter":
+   27:             event.stop()
+   28:             event.prevent_default()
+   29:             if self.text.strip():
+   30:                 self.post_message(self.Submitted(self))
+   31:             return
+   32:         if key in ("alt+enter", "shift+enter", "ctrl+j", "super+enter"):
+   33:             event.stop()
+   34:             event.prevent_default()
+   35:             if not self.read_only:
+   36:                 self.insert("\n")
+   37:             return
+   38:         await super()._on_key(event)
+   39: 
+   40: 
+   41: class LLMStreamBlock(Static):  # 用于在一个Widget里显示文字。而不是一个token创建一个Widget显示。
+   42:     def __init__(self):
+   43:         super().__init__("")
+   44:         self._text: str = ""
+   45:         self._finalized: bool = False
+   46: 
+   47:     def append_token(self, token: str) -> None:
+   48:         self._text += token
+   49:         self.update(self._text)
+   50: 
+   51:     def finalize_markdown(self) -> None:
+   52:         self._finalized = True
+   53:         if self._text.strip():
+   54:             self.update(Markdown(self._text))
+   55: 
+   56: 
+   57: class ToolCallBlock(Widget):
+   58:     DEFAULT_CSS = """
+   59:         ToolCallBlock { height: auto; padding: 0 2; color: $text-muted; }
+   60:         ToolCallBlock > .detail { display: none; padding: 0 2 0 4; color: $text-muted; }
+   61:         ToolCallBlock.expanded > .detail { display: block; }
+   62:         """
+   63: 
+   64:     # 样式设计：默认状态（折叠）：height: auto 自适应高度，只显示摘要行。内部的 .detail（详情区域）被 display: none 隐藏。
+   65:     # 展开状态：当父容器拥有 expanded 类时，.detail 变为 display: block 显示出来。
+   66:     # 颜色：使用 $text-muted（柔和的灰色），表明这些是辅助性日志信息。
+   67:     def __init__(self, tool_name: str, params: dict[str, Any]) -> None:
+   68:         super().__init__()
+   69:         self._tool_name = tool_name
+   70:         self._params = params
+   71:         self._params_full: str = _params_str(self._params)
+   72:         self._output = ""
+   73:         self._elapsed_ms = 0
+   74:         self._is_error = False
+   75:         self._finished = False
+   76: 
+   77:     def compose(self) -> ComposeResult:
+   78:         yield Static(self._summary(), classes="summary")
+   79:         yield Static("", classes="detail")
+   80: 
+   81:     def _summary(self) -> str:  # 根据全文生成摘要。

@@ -1,0 +1,18 @@
+  515:         self._busy = False
+  536:         items: list[tuple[str, str]] = [("compact", "compress context window")]
+  618:         # 检测 /compact 指令
+  619:         if content == "/compact":
+  621:             if self._client is not None and self._session_id is not None and not self._busy:
+  622:                 self.run_worker(self._do_compact(), name="compact", exclusive=False)
+  624:         if self._client is None or self._session_id is None or self._busy:
+  627:         self._busy = True
+  638:     async def _do_compact(self) -> None:
+  641:         self._append(Static("[dim]⚡ compacting context...[/dim]", classes="log-line"))
+  644:                 "session.compact",
+  651:                 f"[bold cyan]⚡ Context compacted[/bold cyan]"
+  656:             self._append(Static(f"[red]compact error: {e}[/red]", classes="log-line"))
+  668:             self._busy = False
+  861:             self._busy = False
+  871:             self._busy = False
+  995:         elif t == "context.compacted":
+ 1000:                 f"[bold cyan]⚡ Context compacted[/bold cyan]"

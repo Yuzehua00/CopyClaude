@@ -330,6 +330,18 @@ class CopyClaudeTuiApp(App[None]):  # 这里也有处理事件的逻辑
         yield VerticalScroll(id="log-view")
         yield ChatTextArea(id="prompt", show_line_numbers=False)
 
+        # 生成 context 占用率的彩色进度条字符串
+    def _render_ctx_bar(self, pct: float) -> str:
+        filled = int(pct * 20)
+        bar = "█" * filled + "░" * (20 - filled)
+        label = f"ctx:{pct * 100:.1f}%"
+        if pct >= 0.85:
+            color = "bold red"
+        elif pct >= 0.70:
+            color = "yellow"
+        else:
+            color = "dim"
+        return f"[{color}]{label} {bar}[/{color}]"
     def on_mount(self) -> None:
         self.run_worker(self._socket_loop(), exclusive=True, name="socket")
         prompt = self.query_one("#prompt", ChatTextArea)
@@ -414,11 +426,43 @@ class CopyClaudeTuiApp(App[None]):  # 这里也有处理事件的逻辑
             self._update_header("ready")
             self._append(Static(f"[red]send error: {e}[/red]", classes="log-line"))
 
+    # 在 worker 中执行手动压缩命令，完成后显示结果横幅
+    async def _do_compact(self) -> None:
+        if self._client is None or self._session_id is None:
+            return
+        self._append(Static("[dim]⚡ compacting context...[/dim]", classes="log-line"))
+        try:
+            result = await self._client.send_command(
+                "session.compact",
+                {"session_id": self._session_id, "focus": ""},
+            )
+            summary_tokens = result.get("summary_tokens", 0)
+            saved_tokens = result.get("saved_tokens", 0)
+            self._last_context_pct = 0.0
+            self._append(Static(
+                f"[bold cyan]⚡ Context compacted[/bold cyan]"
+                f"  [dim]summary={summary_tokens} tokens  saved≈{saved_tokens} tokens[/dim]",
+                classes="log-line",
+            ))
+        except (IpcError, RuntimeError, OSError) as e:
+            self._append(Static(f"[red]compact error: {e}[/red]", classes="log-line"))
     # 将输入框提交内容发送给当前 chat session
     async def on_chat_text_area_submitted(self, event: ChatTextArea.Submitted) -> None:
         # 你定义的事件类：ChatTextArea.Submitted要与名字对齐。
         content = event.value.strip()
         if not content:
+            return
+            # 检测 /compact 指令
+        if content == "/compact":
+            event.area.text = ""
+            if self._client is None:
+                self._append(Static("[yellow]compact: not connected[/yellow]", classes="log-line"))
+            elif self._session_id is None:
+                self._append(Static("[yellow]compact: no session[/yellow]", classes="log-line"))
+            elif self._busy:
+                self._append(Static("[yellow]compact: agent busy[/yellow]", classes="log-line"))
+            else:
+                self.run_worker(self._do_compact(), name="compact", exclusive=False)
             return
         if self._client is None:
             self._append(Static("[yellow]connect error[/yellow]", classes="log-line"))
@@ -470,6 +514,7 @@ class CopyClaudeTuiApp(App[None]):  # 这里也有处理事件的逻辑
                         "llm.usage",
                         "log.*",
                         "permission.*",
+                        "context.*",
                     ],
                     "scope": "global",
                 }
@@ -597,16 +642,6 @@ class CopyClaudeTuiApp(App[None]):  # 这里也有处理事件的逻辑
                     f"[bold red]✗ failed[/bold red]{detail}  [dim]{steps} steps[/dim]",
                     classes="run-err",
                 ))
-
-        elif t == "llm.usage":
-            self._append(Static(
-                f"[dim]  tokens  "
-                f"in={event.get('input_tokens')} "
-                f"out={event.get('output_tokens')} "
-                f"cache={event.get('cache_read_input_tokens')}[/dim]",
-                classes="usage",
-            ))
-
         elif t == "log.line":
             level = event.get("level", "INFO")
             color = "bold red" if level == "ERROR" else ("yellow" if level == "WARNING" else "dim")
@@ -657,25 +692,25 @@ class CopyClaudeTuiApp(App[None]):  # 这里也有处理事件的逻辑
                         p.read_only = False
                         p.border_title = "type a message — enter to send, ⌘/⇧/⌥+enter for newline"
                         p.focus()
-    # def _handle_event_inner(self, event: dict[str, Any]) -> None:
-    #     event_type = event.get("type")
-    #
-    #     if event_type == "llm.token":
-    #         token = event.get("token", "")
-    #         if self._current_llm is None:
-    #             llm_block = LLMStreamBlock()
-    #             self._append(llm_block)
-    #         self._current_llm.append_token(token)
-    #         return
-    #
-    #     self._flush_tokens(log)  # 非 token 事件来了，先把缓冲区写出去
-    #
-    #     if event_type == "run.started":
-    #         log.write(f"[bold blue]▶ run[/bold blue]  {event.get('run_id')}  {event.get('goal')}")
-    #     elif event_type == "run.finished":
-    #         s = event.get("status", "")
-    #         color = "green" if s == "success" else "red"
-    #         log.write(f"[{color}]■ run[/{color}]  {s}  {event.get('steps')} steps")
+        elif t == "llm.usage":
+            pct = float(event.get("context_pct") or 0.0)
+            self._last_context_pct = pct
+            ctx_bar = self._render_ctx_bar(pct)
+            self._append(Static(
+                f"tokens in={event.get('input_tokens')} "
+                f"out={event.get('output_tokens')} "
+                f"cache={event.get('cache_read_input_tokens')} "
+                f"{ctx_bar}",
+                classes="usage",
+            ))
+        elif t == "context.compacted":
+            orig = event.get("original_tokens", 0)
+            summary = event.get("summary_tokens", 0)
+            self._last_context_pct = 0.0
+            self._append(Static(
+                f"Context compacted original≈{orig} tokens → summary={summary} tokens",
+                classes="log-line",
+            ))
 
     def _break_llm(self) -> None:
         if self._current_llm is not None:

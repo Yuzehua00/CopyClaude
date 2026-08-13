@@ -40,7 +40,7 @@ class EventPushEnvelope(BaseModel):
 
 
 class HandlerError(Exception): # 处理器错误
-    def __init__(self, code: int, message: str, data: Any|None) -> None:
+    def __init__(self, code: int, message: str, data: Any | None = None) -> None:
         super().__init__(message)
         self.code = code
         self.data = data

@@ -1,0 +1,67 @@
+  554:         t = event.get("type", "")
+  555: 
+  556:         if t == "llm.token":
+  557:             token = event.get("token", "")
+  558:             if self._current_llm is None:
+  559:                 llm_block = LLMStreamBlock()
+  560:                 self._append(llm_block)
+  561:                 self._current_llm = llm_block
+  562:             self._current_llm.append_token(token)
+  563:             return
+  564: 
+  565:         self._break_llm()
+  566: 
+  567:         if t == "session.waiting_for_input":
+  568:             self._busy = False
+  569:             prompt = self._prompt()
+  570:             if prompt is not None:
+  571:                 prompt.disabled = False
+  572:                 prompt.border_title = "type a message — enter to send, ⌘/⇧/⌥+enter for newline"
+  573:                 prompt.focus()
+  574:             self._update_header("ready")
+  575: 
+  576:         elif t == "session.closed":
+  577:             self._busy = False
+  578:             prompt = self._prompt()
+  579:             if prompt is not None:
+  580:                 prompt.disabled = True
+  581:                 prompt.border_title = "session closed"
+  582:             self._update_header("disconnected")
+  583: 
+  584:         elif t == "run.started":
+  585:             run_id = event.get("run_id", "")
+  586:             goal = event.get("goal", "")
+  587:             self._append(Static(
+  588:                 f"[dim]run[/dim]  [cyan]{run_id}[/cyan]  [dim]{_preview(goal, 96)}[/dim]",
+  589:                 classes="run-header",
+  590:             ))
+  591: 
+  592:         elif t == "step.started":
+  593:             step = event.get("step", "")
+  594:             self._append(Static(
+  595:                 f"[dim]step {step}[/dim]",
+  596:                 classes="step-divider",
+  597:             ))
+  598: 
+  599:         elif t == "tool.call_started":
+  600:             tool_use_id = str(event.get("tool_use_id", ""))
+  601:             tool_name = str(event.get("tool_name", ""))
+  602:             params = event.get("params") or {}
+  603:             tc_block = ToolCallBlock(tool_name, params)
+  604:             self._pending_tool_blocks[tool_use_id] = tc_block
+  605:             self._append(tc_block)
+  606: 
+  607:         elif t == "tool.call_finished":
+  608:             tool_use_id = str(event.get("tool_use_id", ""))
+  609:             elapsed_ms = int(event.get("elapsed_ms") or 0)
+  610:             output = str(event.get("output") or "")
+  611:             if tool_use_id in self._pending_tool_blocks:
+  612:                 tc_done = self._pending_tool_blocks.pop(tool_use_id)
+  613:                 tc_done.set_result(output, elapsed_ms)
+  614: 
+  615:         elif t == "tool.call_failed":
+  616:             tool_use_id = str(event.get("tool_use_id", ""))
+  617:             elapsed_ms = int(event.get("elapsed_ms") or 0)
+  618:             error_msg = str(event.get("error_message") or "")
+  619:             if tool_use_id in self._pending_tool_blocks:
+  620:                 tc_done = self._pending_tool_blocks.pop(tool_use_id)

@@ -1,0 +1,250 @@
+    1: from __future__ import annotations
+    2: 
+    3: import asyncio
+    4: import datetime
+    5: import fnmatch
+    6: import json
+    7: import logging
+    8: import signal
+    9: import time
+   10: from datetime import UTC
+   11: from pathlib import Path
+   12: from typing import Any
+   13: 
+   14: from pydantic import BaseModel
+   15: 
+   16: import kama_claude
+   17: from kama_claude.core.bus.commands import (
+   18:     AgentRunCommand,
+   19:     AgentRunResult,
+   20:     EventSubscribeCommand,
+   21:     EventSubscribeResult,
+   22:     PermissionRespondCommand,
+   23:     PermissionRespondResult,
+   24:     PongResult,
+   25:     SessionCloseCommand,
+   26:     SessionCloseResult,
+   27:     SessionCompactCommand,
+   28:     SessionCompactResult,
+   29:     SessionCreateCommand,
+   30:     SessionCreateResult,
+   31:     SessionGetHistoryCommand,
+   32:     SessionGetHistoryResult,
+   33:     SessionSendMessageCommand,
+   34:     SessionSendMessageResult,
+   35: )
+   36: from kama_claude.core.bus.envelope import EventPushEnvelope
+   37: from kama_claude.core.config import KamaConfig, get_config
+   38: from kama_claude.core.events.bus import EventBus
+   39: from kama_claude.core.llm.provider import AnthropicProvider
+   40: from kama_claude.core.logging_setup import setup_logging
+   41: from kama_claude.core.mcp.server import McpServerManager
+   42: from kama_claude.core.permissions.manager import PermissionManager
+   43: from kama_claude.core.permissions.storage import load_policy_file
+   44: from kama_claude.core.runner import AgentRunner
+   45: from kama_claude.core.runs import events_file, new_run_id
+   46: from kama_claude.core.session import SessionManager, SessionStore
+   47: from kama_claude.core.trace.record import TraceRecord
+   48: from kama_claude.core.trace.writer import TraceWriter
+   49: from kama_claude.core.transport.ipc_broadcaster import IpcEventBroadcaster
+   50: from kama_claude.core.transport.socket_server import SocketServer, get_connection_writer
+   51: 
+   52: logger = logging.getLogger(__name__)
+   53: 
+   54: 
+   55: def _now() -> str:
+   56:     return datetime.datetime.now(UTC).isoformat()
+   57: 
+   58: 
+   59: class CoreApp:
+   60:     def __init__(self) -> None:
+   61:         self._start_time = time.monotonic()
+   62:         self._bus = EventBus()
+   63:         self._broadcaster: IpcEventBroadcaster | None = None
+   64:         self._trace: TraceWriter | None = None
+   65:         self._config: KamaConfig | None = None
+   66:         self._running_runs: set[asyncio.Task[Any]] = set()
+   67:         self._sessions: SessionManager | None = None
+   68:         self._permission_manager: PermissionManager | None = None
+   69:         self._mcp_manager: McpServerManager | None = None
+   70: 
+   71:     # 处理 core.ping 请求，返回服务版本、运行时长和接收时间
+   72:     async def _ping_handler(self, params: dict[str, Any]) -> PongResult:
+   73:         client = params.get("client", "unknown")
+   74:         logger.debug("ping from %s", client)
+   75:         return PongResult(
+   76:             server_version=kama_claude.__version__,
+   77:             uptime_ms=int((time.monotonic() - self._start_time) * 1000),
+   78:             received_at=datetime.datetime.now(datetime.UTC).isoformat(),
+   79:         )
+   80: 
+   81:     # 将 EventBus 事件写入 trace（作为 EventBus 订阅者）
+   82:     async def _trace_event_handler(self, event: BaseModel) -> None:
+   83:         assert self._trace is not None
+   84:         event_dict = event.model_dump()
+   85:         self._trace.emit(
+   86:             TraceRecord(
+   87:                 ts=_now(),
+   88:                 direction="CORE",
+   89:                 layer="event",
+   90:                 kind="event",
+   91:                 run_id=event_dict.get("run_id"),
+   92:                 data=event_dict,
+   93:             )
+   94:         )
+   95: 
+   96:     # 启动一次 agent run：异步创建 AgentRunner 并立即返回 run_id
+   97:     async def _agent_run_handler(self, params: dict[str, Any]) -> AgentRunResult:
+   98:         assert self._sessions is not None
+   99:         cmd = AgentRunCommand.model_validate(params)
+  100:         session = await self._sessions.create(mode="one_shot", title=cmd.goal[:40])
+  101:         run_id = new_run_id()
+  102:         run_task = asyncio.create_task(
+  103:             self._sessions.send_message(session.id, cmd.goal, run_id=run_id)
+  104:         )
+  105:         self._running_runs.add(run_task)
+  106:         run_task.add_done_callback(self._running_runs.discard)
+  107:         return AgentRunResult(run_id=run_id)
+  108: 
+  109:     # 创建 chat 或 one_shot session，并返回 session_id
+  110:     async def _session_create_handler(self, params: dict[str, Any]) -> SessionCreateResult:
+  111:         assert self._sessions is not None
+  112:         cmd = SessionCreateCommand.model_validate(params)
+  113:         session = await self._sessions.create(mode=cmd.mode, title=cmd.title)
+  114:         return SessionCreateResult(session_id=session.id, status=session.status)
+  115: 
+  116:     # 向 session 发送一条用户消息并同步等待对应 run 完成
+  117:     async def _session_send_handler(self, params: dict[str, Any]) -> SessionSendMessageResult:
+  118:         assert self._sessions is not None
+  119:         cmd = SessionSendMessageCommand.model_validate(params)
+  120:         run_id = await self._sessions.send_message(cmd.session_id, cmd.content)
+  121:         return SessionSendMessageResult(run_id=run_id)
+  122: 
+  123:     # 返回 session 的完整 Anthropic messages 历史
+  124:     async def _session_history_handler(self, params: dict[str, Any]) -> SessionGetHistoryResult:
+  125:         assert self._sessions is not None
+  126:         cmd = SessionGetHistoryCommand.model_validate(params)
+  127:         messages = await self._sessions.get_history(cmd.session_id)
+  128:         return SessionGetHistoryResult(messages=messages)
+  129: 
+  130:     # 接收客户端权限审批响应，resolve 对应挂起的 Future
+  131:     async def _permission_respond_handler(self, params: dict[str, Any]) -> PermissionRespondResult:
+  132:         cmd = PermissionRespondCommand.model_validate(params)
+  133:         logger.info(
+  134:             "permission.respond received tool_use_id=%s decision=%s",
+  135:             cmd.tool_use_id, cmd.decision,
+  136:         )
+  137:         if self._permission_manager is None:
+  138:             logger.error("permission.respond: PermissionManager not initialized")
+  139:             return PermissionRespondResult()
+  140:         self._permission_manager.respond(cmd.tool_use_id, cmd.decision)
+  141:         return PermissionRespondResult()
+  142: 
+  143:     # 手动压缩 session thread，将摘要持久化写入 thread.jsonl
+  144:     async def _session_compact_handler(self, params: dict[str, Any]) -> SessionCompactResult:
+  145:         assert self._sessions is not None
+  146:         cmd = SessionCompactCommand.model_validate(params)
+  147:         result = await self._sessions.compact(cmd.session_id, cmd.focus)
+  148:         return result  # type: ignore[no-any-return]
+  149: 
+  150:     # 关闭 session 并返回 closed 状态
+  151:     async def _session_close_handler(self, params: dict[str, Any]) -> SessionCloseResult:
+  152:         assert self._sessions is not None
+  153:         cmd = SessionCloseCommand.model_validate(params)
+  154:         await self._sessions.close(cmd.session_id)
+  155:         return SessionCloseResult(status="closed")
+  156: 
+  157:     # 注册客户端事件订阅，可选先回放 events.jsonl 历史再接收实时流
+  158:     async def _subscribe_handler(self, params: dict[str, Any]) -> EventSubscribeResult:
+  159:         cmd = EventSubscribeCommand.model_validate(params)
+  160:         writer = get_connection_writer()
+  161: 
+  162:         replayed_count = 0
+  163:         if cmd.replay_from_run is not None:
+  164:             replayed_count = await self._replay_events(
+  165:                 cmd.replay_from_run, writer, cmd.topics
+  166:             )
+  167: 
+  168:         assert self._broadcaster is not None
+  169:         sub_id = self._broadcaster.subscribe(writer, cmd.topics, cmd.scope)
+  170:         return EventSubscribeResult(subscription_id=sub_id, replayed_count=replayed_count)
+  171: 
+  172:     # 从 events.jsonl 向 writer 回放匹配 topic 的历史事件，返回已回放条数
+  173:     async def _replay_events(
+  174:         self,
+  175:         run_id: str,
+  176:         writer: asyncio.StreamWriter,
+  177:         topics: list[str],
+  178:     ) -> int:
+  179:         path = events_file(run_id) # 根据run_id获取事件文件路径event_json。
+  180:         if not path.exists(): # 路径不存在就去C盘精确匹配。
+  181:             for candidate in Path("~/.kama/sessions").expanduser().glob(
+  182:                 f"*/runs/{run_id}/events.jsonl"
+  183:             ):
+  184:                 path = candidate
+  185:                 break
+  186:         if not path.exists(): # 匹配未成功则返回。
+  187:             return 0
+  188: 
+  189:         count = 0
+  190:         for line in path.read_text().splitlines(): # 按行读取文件
+  191:             if not line:
+  192:                 continue
+  193:             try:
+  194:                 event = json.loads(line)
+  195:             except json.JSONDecodeError:
+  196:                 continue
+  197:             event_type: str = event.get("type", "")
+  198:             if not any(fnmatch.fnmatch(event_type, p) for p in topics):
+  199:                 continue
+  200:             envelope = EventPushEnvelope(event=event)
+  201:             writer.write(envelope.model_dump_json().encode() + b"\n")
+  202:             count += 1
+  203: 
+  204:         if count:
+  205:             await writer.drain()
+  206:         return count
+  207: 
+  208:     # 启动守护进程：加载配置、初始化日志、启动 trace、启动 TCP 服务器，并等待退出信号
+  209:     async def run(self) -> None:
+  210:         self._start_time = time.monotonic()
+  211:         self._config = get_config()
+  212:         setup_logging(self._config)
+  213:         if self._config.trace.enabled:
+  214:             trace_path = Path(self._config.trace.file).expanduser()
+  215:             self._trace = TraceWriter(trace_path)
+  216:             await self._trace.start()
+  217:             self._bus.subscribe(self._trace_event_handler)
+  218: 
+  219:         policy_file = Path("~/.kama/policy.toml").expanduser()
+  220:         self._permission_manager = PermissionManager(
+  221:             policy_file=policy_file,
+  222:             timeout_s=self._config.permission.timeout_s,
+  223:         )
+  224:         logger.info(
+  225:             "permission manager: timeout_s=%.1f  persistent=%d entries",
+  226:             self._config.permission.timeout_s,
+  227:             len(load_policy_file(policy_file)),
+  228:         )
+  229: 
+  230:         self._broadcaster = IpcEventBroadcaster(trace=self._trace)
+  231:         self._bus.subscribe(self._broadcaster.handle)
+  232:         sessions_root = Path("~/.kama/sessions").expanduser()
+  233:         store = SessionStore(sessions_root)
+  234:         assert self._config is not None
+  235:         compact_provider = AnthropicProvider(self._config.llm.default_model)
+  236: 
+  237:         self._mcp_manager = McpServerManager()
+  238:         if self._config.mcp.servers:
+  239:             logger.info("mcp: starting %d server(s)", len(self._config.mcp.servers))
+  240:             await self._mcp_manager.start_all(self._config.mcp.servers)
+  241: 
+  242:         self._sessions = SessionManager(
+  243:             store,
+  244:             runner_factory=lambda: AgentRunner(
+  245:                 self._config,  # type: ignore[arg-type]
+  246:                 bus=self._bus,
+  247:                 trace=self._trace,
+  248:                 permission_manager=self._permission_manager,
+  249:                 mcp_manager=self._mcp_manager,
+  250:             ),

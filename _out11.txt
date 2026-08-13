@@ -1,0 +1,80 @@
+  601:         except Exception:
+  602:             pass
+  603: 
+  604:     # 退出前尽力关闭当前 session，失败也不阻塞 TUI 退出
+  605:     async def action_quit(self) -> None:
+  606:         if self._client is not None and self._session_id is not None:
+  607:             try:
+  608:                 await self._client.send_command("session.close", {"session_id": self._session_id})
+  609:             except (IpcError, RuntimeError, OSError):
+  610:                 self._append(Static("[yellow]warning: failed to close session[/yellow]"))
+  611:         self.exit()
+  612: 
+  613:     # 将输入框提交内容发送给当前 chat session；用 worker 发送，避免 await 阻塞 App 消息泵
+  614:     async def on_chat_text_area_submitted(self, event: ChatTextArea.Submitted) -> None:
+  615:         content = event.value.strip()
+  616:         if not content:
+  617:             return
+  618:         # 检测 /compact 指令
+  619:         if content == "/compact":
+  620:             event.text_area.text = ""
+  621:             if self._client is not None and self._session_id is not None and not self._busy:
+  622:                 self.run_worker(self._do_compact(), name="compact", exclusive=False)
+  623:             return
+  624:         if self._client is None or self._session_id is None or self._busy:
+  625:             self._append(Static("[yellow]agent busy or disconnected[/yellow]", classes="log-line"))
+  626:             return
+  627:         self._busy = True
+  628:         prompt = event.text_area
+  629:         prompt.text = ""
+  630:         prompt.disabled = True
+  631:         prompt.read_only = False
+  632:         prompt.border_title = "agent is working..."
+  633:         self._append(Static(f"[bold]>[/bold] {content}", classes="user-turn"))
+  634:         self._update_header("running")
+  635:         self.run_worker(self._do_send_message(content), name="send_message", exclusive=False)
+  636: 
+  637:     # 在 worker 中执行手动压缩命令，完成后显示结果横幅
+  638:     async def _do_compact(self) -> None:
+  639:         if self._client is None or self._session_id is None:
+  640:             return
+  641:         self._append(Static("[dim]⚡ compacting context...[/dim]", classes="log-line"))
+  642:         try:
+  643:             result = await self._client.send_command(
+  644:                 "session.compact",
+  645:                 {"session_id": self._session_id, "focus": ""},
+  646:             )
+  647:             summary_tokens = result.get("summary_tokens", 0)
+  648:             saved_tokens = result.get("saved_tokens", 0)
+  649:             self._last_context_pct = 0.0
+  650:             self._append(Static(
+  651:                 f"[bold cyan]⚡ Context compacted[/bold cyan]"
+  652:                 f"  [dim]summary={summary_tokens} tokens  saved≈{saved_tokens} tokens[/dim]",
+  653:                 classes="log-line",
+  654:             ))
+  655:         except (IpcError, RuntimeError, OSError) as e:
+  656:             self._append(Static(f"[red]compact error: {e}[/red]", classes="log-line"))
+  657: 
+  658:     # 在 worker 中执行 IPC 发送，使 App 消息泵在 agent 运行期间仍能处理键盘/焦点等消息
+  659:     async def _do_send_message(self, content: str) -> None:
+  660:         if self._client is None:
+  661:             return
+  662:         try:
+  663:             await self._client.send_command(
+  664:                 "session.send_message",
+  665:                 {"session_id": self._session_id, "content": content},
+  666:             )
+  667:         except (IpcError, RuntimeError, OSError) as e:
+  668:             self._busy = False
+  669:             prompt = self._prompt()
+  670:             if prompt is not None:
+  671:                 prompt.disabled = False
+  672:                 prompt.read_only = False
+  673:                 prompt.border_title = "type a message — enter to send, ⌘/⇧/⌥+enter for newline"
+  674:             self._update_header("ready")
+  675:             self._append(Static(f"[red]send error: {e}[/red]", classes="log-line"))
+  676: 
+  677:     # 处理内联审批控件的用户决策：发送 IPC 响应并恢复输入框
+  678:     async def on_permission_select_decided(self, msg: PermissionSelect.Decided) -> None:
+  679:         tool_use_id = msg.tool_use_id
+  680:         decision = msg.decision

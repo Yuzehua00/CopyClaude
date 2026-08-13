@@ -1,0 +1,55 @@
+  246:                 bus=self._bus,
+  247:                 trace=self._trace,
+  248:                 permission_manager=self._permission_manager,
+  249:                 mcp_manager=self._mcp_manager,
+  250:             ),
+  251:             bus=self._bus,
+  252:             provider=compact_provider,
+  253:         )
+  254: 
+  255:         server = SocketServer(
+  256:             self._config.host,
+  257:             self._config.port,
+  258:             self._broadcaster,
+  259:             trace=self._trace,
+  260:         )
+  261:         server.register("core.ping", self._ping_handler)
+  262:         server.register("agent.run", self._agent_run_handler)
+  263:         server.register("event.subscribe", self._subscribe_handler)
+  264:         server.register("session.create", self._session_create_handler)
+  265:         server.register("session.send_message", self._session_send_handler)
+  266:         server.register("session.get_history", self._session_history_handler)
+  267:         server.register("session.close", self._session_close_handler)
+  268:         server.register("permission.respond", self._permission_respond_handler)
+  269:         server.register("session.compact", self._session_compact_handler)
+  270: 
+  271:         addr = await server.start()
+  272:         logger.info("kama-core %s listening addr=%s", kama_claude.__version__, addr)
+  273:         logger.info("config: %s", self._config)
+  274: 
+  275:         loop = asyncio.get_running_loop()
+  276:         shutdown = asyncio.Event()
+  277:         '-----------------------------------------------自己修改-----------------------------------------------------'
+  278:         import sys
+  279:         if sys.platform != 'win32':
+  280:             '-------------------------------------------自己修改-----------------------------------------------------'
+  281:             loop.add_signal_handler(signal.SIGINT, shutdown.set)
+  282:             loop.add_signal_handler(signal.SIGTERM, shutdown.set)
+  283: 
+  284:         await shutdown.wait()
+  285: 
+  286:         logger.info("shutting down")
+  287:         for run_task in list(self._running_runs):
+  288:             run_task.cancel()
+  289:         if self._running_runs:
+  290:             await asyncio.gather(*self._running_runs, return_exceptions=True)
+  291:         if self._mcp_manager is not None:
+  292:             await self._mcp_manager.stop_all()
+  293:         await server.stop()
+  294:         if self._trace is not None:
+  295:             await self._trace.stop()
+  296: 
+  297: 
+  298: # 同步入口：启动 CoreApp 事件循环
+  299: def run() -> None:
+  300:     asyncio.run(CoreApp().run())

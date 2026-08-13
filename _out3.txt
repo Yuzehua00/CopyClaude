@@ -1,0 +1,19 @@
+  430:     async def _do_compact(self) -> None:
+  431:         if self._client is None or self._session_id is None:
+  432:             return
+  433:         self._append(Static("[dim]⚡ compacting context...[/dim]", classes="log-line"))
+  434:         try:
+  435:             result = await self._client.send_command(
+  436:                 "session.compact",
+  437:                 {"session_id": self._session_id, "focus": ""},
+  438:             )
+  439:             summary_tokens = result.get("summary_tokens", 0)
+  440:             saved_tokens = result.get("saved_tokens", 0)
+  441:             self._last_context_pct = 0.0
+  442:             self._append(Static(
+  443:                 f"[bold cyan]⚡ Context compacted[/bold cyan]"
+  444:                 f"  [dim]summary={summary_tokens} tokens  saved≈{saved_tokens} tokens[/dim]",
+  445:                 classes="log-line",
+  446:             ))
+  447:         except (IpcError, RuntimeError, OSError) as e:
+  448:             self._append(Static(f"[red]compact error: {e}[/red]", classes="log-line"))

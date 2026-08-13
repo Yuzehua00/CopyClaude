@@ -9,6 +9,7 @@ from copy_claude.core.events.bus import EventBus
 from copy_claude.core.context import ExecutionContext
 from copy_claude.core.bus.events import StepStartedEvent, StepFinishedEvent
 from copy_claude.core.tools.invocation import invoke_tool
+from copy_claude.core.compact.compactor import Compactor
 from datetime import datetime, UTC
 
 
@@ -23,12 +24,16 @@ class AgentLoop:  # 一句话的循环
                  bus: EventBus,
                  *,
                  permission_manager: PermissionManager | None = None,
-                 session_id: str | None = None) -> None:
+                 session_id: str | None = None,
+                 compactor:Compactor|None = None,
+                 compact_threshold:float = 0.80) -> None:
         self._provider = provider  # 类型检查实现chat方法的类，一般为anthropic的类，要传入env设置的环境变量的api_key
         self._registry = registry
         self._bus = bus
         self._permission_manager = permission_manager
         self._session_id = session_id
+        self._compactor = compactor
+        self._compact_threshold = compact_threshold
 
     async def run(self, context: ExecutionContext) -> None:  # context上下文此时第一句话是用户目标
         while not context.is_done():  # 上下文没返回结束，代表循环未完成
@@ -73,4 +78,15 @@ class AgentLoop:  # 一句话的循环
                 context.mark_success()
             elif context.step >= context.max_steps:
                 context.mark_failed("exceeded_max_steps")
+                # 工具结果追加完毕（messages 末尾为 user）后检查压缩，仅在 run 继续时触发
+                # 此时压缩结果 [user_summary, assistant_ack] 对下一次 LLM 调用是合法输入
+            if (
+                    not context.is_done()
+                    and response.stop_reason == "tool_use"
+                    and self._compactor is not None
+                    and self._compact_threshold > 0
+                    and response.usage is not None
+                    and response.usage.context_pct >= self._compact_threshold
+            ):
+                await self._compactor.compact(context, self._provider) # 自动压缩调用为
             await self._bus.publish(StepFinishedEvent(run_id=context.run_id, step=context.step, ts=_now()))

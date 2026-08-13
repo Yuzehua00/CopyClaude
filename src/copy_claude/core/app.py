@@ -24,7 +24,7 @@ from copy_claude.core.bus.commands import (  # Command添加session创建和sess
     SessionGetHistoryCommand,
     SessionGetHistoryResult,
     SessionCloseCommand,
-    SessionCloseResult, PermissionRespondCommand, PermissionRespondResult
+    SessionCloseResult, PermissionRespondCommand, PermissionRespondResult, SessionCompactResult, SessionCompactCommand
 )
 from copy_claude.core.bus.envelope import EventPushEnvelope
 from copy_claude.core.llm.provider import AnthropicProvider
@@ -139,6 +139,12 @@ class CoreApp:  # 所有用户的命令处理器都在这里定义，真正的�
         self._permission_manager.respond(cmd.tool_use_id, cmd.decision)
         return PermissionRespondResult()
 
+    # 手动压缩 session thread，将摘要持久化写入 thread.jsonl
+    async def _session_compact_handler(self, params: dict[str, Any]) -> SessionCompactResult:
+        assert self._sessions is not None
+        cmd = SessionCompactCommand.model_validate(params)
+        result = await self._sessions.compact(cmd.session_id, cmd.focus)
+        return result  # type: ignore[no-any-return]
 
     async def _replay_events(self,
                              run_id: str,
@@ -216,6 +222,7 @@ class CoreApp:  # 所有用户的命令处理器都在这里定义，真正的�
         server.register("session.get_history", self._session_history_handler)
         server.register("session.close", self._session_close_handler)
         server.register("permission.respond", self._permission_respond_handler)
+        server.register("session.compact", self._session_compact_handler)
         # S3广播器追加trace
         self._broadcaster = IpcEventBroadcaster(trace=self._trace)
         self._bus.subscribe(self._broadcaster.handle)

@@ -1,0 +1,15 @@
+  136:     async def _permission_respond_handler(self, params):
+  137:         assert self._permission_manager is not None
+  138:         cmd = PermissionRespondCommand.model_validate(params)
+  139:         self._permission_manager.respond(cmd.tool_use_id, cmd.decision)
+  140:         return PermissionRespondResult()
+  141: 
+  142:     # 手动压缩 session thread，将摘要持久化写入 thread.jsonl
+  143:     async def _session_compact_handler(self, params: dict[str, Any]) -> SessionCompactResult:
+  144:         assert self._sessions is not None
+  145:         cmd = SessionCompactCommand.model_validate(params)
+  146:         result = await self._sessions.compact(cmd.session_id, cmd.focus)
+  147:         return result  # type: ignore[no-any-return]
+  148: 
+  149:     async def _replay_events(self,
+  150:                              run_id: str,

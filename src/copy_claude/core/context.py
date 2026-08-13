@@ -12,6 +12,8 @@ class ExecutionContext:  # Agent记忆模块。聊天上下文,每次交互的�
     messages: list[dict[str, Any]] = field(default_factory=list)
     # messages 是整个上下文最核心的部分。它的格式和 Anthropic API 要求的完全一致，涉及对话记录、思维链记录、工具调用记录
     session_notes: str = field(default_factory=str)
+    global_context: str = "" # S6全局记忆和项目记忆在这里填入系统提示词
+    project_context: str = ""
     step: int = 0  # 当前步数
     status: str = "running"  # "running" | "success" | "failed" ，决定是否运行
     reason: str | None = None
@@ -55,12 +57,18 @@ class ExecutionContext:  # Agent记忆模块。聊天上下文,每次交互的�
 
     def system_prompt(self,base:str) -> str:
         # base 是基础提示词，如果存在session_notes就添加上，否则只返回原提示词
-        if self.session_notes is None:
-            return base
-        else:
-            return (
-                    base
-                    + "\n\n## Session Notes\n"
-                    + self.session_notes.strip()
-                    + "\n\nRemember important durable facts by calling note_save."
+        # S6:会话notes\全局上下文\项目上下文，哪个有就填哪个。
+        # 为什么存在系统提示词里？因为这些不是某一轮用户消息。~/.kama/context.md 可能是用户长期偏好，.kama/context.md 可能是项目目录约定，
+        # notes.md 是会话事实层。它们都是工作背景。
+        parts = [base]
+        if self.global_context.strip():
+            parts.append("\n\n## Global Context\n" + self.global_context.strip())
+        if self.project_context.strip():
+            parts.append("\n\n## Project Context\n" + self.project_context.strip())
+        if self.session_notes.strip():
+            parts.append(
+                "\n\n## Session Notes\n"
+                + self.session_notes.strip()
+                + "\n\nRemember important durable facts by calling note_save."
             )
+        return "".join(parts)

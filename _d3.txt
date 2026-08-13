@@ -1,0 +1,162 @@
+--- COPY
++++ KAMA
+@@ -1,27 +1,18 @@
+ from __future__ import annotations
+-# 用于调用大模型将完整的上下文压缩成摘要，保存重要信息。
++
+ import logging
++from dataclasses import dataclass
++from datetime import UTC, datetime
+ from pathlib import Path
+-from typing import List, Any
++from typing import TYPE_CHECKING, Any
+ 
+-from copy_claude.core.events.bus import EventBus
+-from copy_claude.core.llm.base import LLMProvider
+-from copy_claude.core.context import ExecutionContext
+-from copy_claude.core.bus.events import ContextCompactedEvent
++from kama_claude.core.bus.events import ContextCompactedEvent
++from kama_claude.core.events.bus import EventBus
++
++if TYPE_CHECKING:
++    from kama_claude.core.context import ExecutionContext
++    from kama_claude.core.llm.base import LLMProvider
++
+ logger = logging.getLogger(__name__)
+-from dataclasses import dataclass
+-from datetime import datetime,UTC
+-@dataclass
+-class CompactionResult: # 压缩结果。
+-    summary_text: str
+-    original_token_estimate: int
+-    summary_tokens: int
+-def _ts_compact() -> str:
+-    return datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
+-
+-
+-# 返回当前 UTC 时间的 ISO 8601 字符串
+-def _now() -> str:
+-    return datetime.now(UTC).isoformat()
+ 
+ _COMPACT_PROMPT = """\
+@@ -53,29 +44,39 @@
+ Be concise. Omit reasoning steps and intermediate attempts. Keep conclusions.\
+ """
++
++
++# 返回当前 UTC 时间的简短时间戳字符串（用于文件名）
++def _ts_compact() -> str:
++    return datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
++
++
++# 返回当前 UTC 时间的 ISO 8601 字符串
++def _now() -> str:
++    return datetime.now(UTC).isoformat()
++
++
++@dataclass
++class CompactionResult:
++    summary_text: str
++    original_token_estimate: int
++    summary_tokens: int
++
++
+ class Compactor:
+-    def __init__(self,
+-                 bus:EventBus, # 事件总线，用于广播事件
+-                 session_dir:Path, # 会话文件夹，用于获取完整session的路径
+-                 session_id:str
+-                 ):
++    # 初始化压缩器，绑定事件总线、session 目录和 session ID
++    def __init__(self, bus: EventBus, session_dir: Path, session_id: str) -> None:
+         self._bus = bus
+         self._session_dir = session_dir
+         self._session_id = session_id
+ 
+-    def _write_summary(self, text: str) -> None:
+-        try:
+-            self._session_dir.mkdir(parents=True, exist_ok=True) # 获取会话路径
+-            path = self._session_dir / f"summary_{_ts_compact()}.md"
+-            path.write_text(text, encoding="utf-8")
+-        except Exception:
+-            logger.exception("compactor: failed to write summary file")
+-    async def compact(self, # 自动化，不落盘
+-                      context:ExecutionContext,
+-                      provider:LLMProvider,
+-                      focus:str="")->CompactionResult | None:
+-        result = await self.compact_messages(messages=context.messages,
+-                                       provider=provider,
+-                                       focus=focus)
+-        if result is None: # 没有压缩结果直接返回
++    # 压缩 ExecutionContext.messages，就地替换消息列表并写 summary 文件
++    async def compact(
++        self,
++        context: ExecutionContext,
++        provider: LLMProvider,
++        focus: str = "",
++    ) -> CompactionResult | None:
++        result = await self.compact_messages(context.messages, provider, focus=focus)
++        if result is None:
+             return None
+ 
+@@ -100,21 +101,29 @@
+         )
+         return result
+-    async def compact_messages(self, # 手动调，落盘
+-                               messages:List[Any], # 原始的上下文
+-                               provider:LLMProvider, # 用来压缩的大模型。
+-                               focus:str = "",# 特别交代给大模型要额外注意的信息。
+-                               )->CompactionResult|None: # 压缩成功返回压缩结果，压缩失败返回None
++
++    # 纯函数式压缩：接收消息列表，返回 CompactionResult；失败时返回 None
++    async def compact_messages(
++        self,
++        messages: list[dict[str, Any]],
++        provider: LLMProvider,
++        focus: str = "",
++    ) -> CompactionResult | None:
++        from kama_claude.core.events.bus import EventBus as _Bus
++
+         original_estimate = sum(
+             len(str(m.get("content", ""))) for m in messages
+-        ) // 4  # S6粗略 token 估算（字符数 / 4）
+-        history_text = _messages_to_text(messages) # S6将消息的列表变成大模型能读取的纯文本
++        ) // 4  # 粗略 token 估算（字符数 / 4）
++
++        history_text = _messages_to_text(messages)
+         prompt = _COMPACT_PROMPT
+         if focus.strip():
+-            prompt += f"\n\nIMPORTANT: Pay special attention to: {focus.strip()}" # S6给压缩提示词加上值得注意的部分
++            prompt += f"\n\nIMPORTANT: Pay special attention to: {focus.strip()}"
++
+         compress_request: list[dict[str, object]] = [
+             {"role": "user", "content": f"{prompt}\n\n---\n\n{history_text}"}
+         ]
++
+         try:
+-            silent_bus = EventBus() # 由于provider.chat刚需EventBus，但又不需要真的把压缩后的文本发给用户，所以搞一个没有订阅事件的bus
++            silent_bus = _Bus()
+             response = await provider.chat(
+                 messages=compress_request,
+@@ -128,4 +137,5 @@
+             logger.exception("compactor: LLM call failed, skipping compaction")
+             return None
++
+         summary_text = response.text.strip()
+         if not summary_text:
+@@ -141,4 +151,15 @@
+         )
+ 
++    # 将摘要文本写入 session 目录的 summary_<ts>.md
++    def _write_summary(self, text: str) -> None:
++        try:
++            self._session_dir.mkdir(parents=True, exist_ok=True)
++            path = self._session_dir / f"summary_{_ts_compact()}.md"
++            path.write_text(text, encoding="utf-8")
++        except Exception:
++            logger.exception("compactor: failed to write summary file")
++
++
++# 将消息列表序列化为可供 LLM 阅读的纯文本
+ def _messages_to_text(messages: list[dict[str, Any]]) -> str:
+     parts: list[str] = []

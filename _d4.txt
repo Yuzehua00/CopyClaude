@@ -1,0 +1,118 @@
+--- COPY
++++ KAMA
+@@ -1,10 +1,10 @@
+ from __future__ import annotations
+-
+-from pydantic import BaseModel, Discriminator  # 通过Discriminator来访问所有command类的type字段直接确定command类型，加速性能。
+ 
+ from typing import Annotated, Any, Literal
+ 
+-from copy_claude.core.session.model import SessionMode, SessionStatus
++from pydantic import BaseModel, Discriminator
++
++from kama_claude.core.session.model import SessionMode, SessionStatus
+ 
+ 
+ class PingCommand(BaseModel):
+@@ -13,21 +13,9 @@
+ 
+ 
+ class PongResult(BaseModel):
+-    server_version: str  # 服务器版本
+-    uptime_ms: int  # 上传时间
+-    received_at: str  # 收自端口号ISO 8601
+-
+-
+-class EventSubscribeCommand(BaseModel):
+-    type: Literal["event.subscribe"] = "event.subscribe"
+-    topics: list[str]  # fnmatch 模式，如 ["step.*", "tool.*"]
+-    scope: str = "global"  # "global" | "run:<run_id>"
+-    replay_from_run: str | None = None  # run_id，设置则先从 events.jsonl 回放历史再接实时流
+-
+-
+-class EventSubscribeResult(BaseModel):
+-    subscribe_id: str
+-    replay_count: int
++    server_version: str
++    uptime_ms: int
++    received_at: str  # ISO 8601
+ 
+ 
+ class AgentRunCommand(BaseModel):
+@@ -37,6 +25,18 @@
+ 
+ class AgentRunResult(BaseModel):
+     run_id: str
++
++
++class EventSubscribeCommand(BaseModel):
++    type: Literal["event.subscribe"] = "event.subscribe"
++    topics: list[str]          # fnmatch 模式，如 ["step.*", "tool.*"]
++    scope: str = "global"      # "global" | "run:<run_id>"
++    replay_from_run: str | None = None  # 设置则先从 events.jsonl 回放历史再接实时流
++
++
++class EventSubscribeResult(BaseModel):
++    subscription_id: str
++    replayed_count: int = 0
+ 
+ 
+ class SessionCreateCommand(BaseModel):
+@@ -50,7 +50,7 @@
+     status: SessionStatus
+ 
+ 
+-class SessionSendMessageCommand(BaseModel):  # 多轮会话发一轮会话信息（run级别）
++class SessionSendMessageCommand(BaseModel):
+     type: Literal["session.send_message"] = "session.send_message"
+     session_id: str
+     content: str
+@@ -66,7 +66,7 @@
+ 
+ 
+ class SessionGetHistoryResult(BaseModel):
+-    message: list[dict[str, Any]]
++    messages: list[dict[str, Any]]
+ 
+ 
+ class SessionCloseCommand(BaseModel):
+@@ -88,23 +88,28 @@
+ class PermissionRespondResult(BaseModel):
+     ok: bool = True
+ 
++
+ class SessionCompactCommand(BaseModel):
+     type: Literal["session.compact"] = "session.compact"
+     session_id: str
+     focus: str = ""
++
++
+ class SessionCompactResult(BaseModel):
+     summary_tokens: int
+     saved_tokens: int
+ 
+-Command = Annotated[  # Annotated	附加元数据，不改变类型	仍视为原始类型	元数据可通过 __metadata__ 访问
+-    PingCommand |
+-    EventSubscribeCommand |
+-    AgentRunCommand |
+-    SessionCreateCommand |
+-    SessionSendMessageCommand |
+-    SessionGetHistoryCommand |
+-    SessionCloseCommand |
+-    SessionCompactCommand |
+-    PermissionRespondCommand,  # 基本类型
+-    Discriminator("type"),  # 元数据，任意 Python 对象，通常是一些描述约束或行为的对象，元数据能跟前面的原始数据一起被读取，用来进行一些判断。
++
++# 根据 type 字段决定命令类型的判别联合
++Command = Annotated[
++    PingCommand
++    | AgentRunCommand
++    | EventSubscribeCommand
++    | SessionCreateCommand
++    | SessionSendMessageCommand
++    | SessionGetHistoryCommand
++    | SessionCloseCommand
++    | PermissionRespondCommand
++    | SessionCompactCommand,
++    Discriminator("type"),
+ ]

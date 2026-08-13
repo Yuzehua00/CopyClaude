@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime, UTC
 import uuid
-from typing import Callable
+from typing import Callable, Any
 import asyncio
 
 from copy_claude.core.runs import new_run_id
@@ -15,7 +15,8 @@ from copy_claude.core.bus.events import (
     SessionResumedEvent,
     SessionReceivedMessageEvent,
     SessionWaitingForInputEvent,
-    SessionClosedEvent)
+    SessionClosedEvent,
+    ContextCompactedEvent)
 from copy_claude.core.events.bus import EventBus
 from copy_claude.core.llm.base import LLMProvider
 from copy_claude.core.runner import AgentRunner
@@ -25,6 +26,8 @@ SESSION_CLOSED = -32011
 SESSION_BUSY = -32012
 
 log = logging.getLogger(__name__)
+
+
 def _now():
     return datetime.now(UTC).isoformat()
 
@@ -86,7 +89,7 @@ class SessionManager:
             session.status = "closed"
             session.updated_at = _now()
             self._store.write_meta(session)
-            await self._bus.publish(SessionClosedEvent(session_id=sid,ts=session.updated_at))
+            await self._bus.publish(SessionClosedEvent(session_id=sid, ts=session.updated_at))
 
     async def send_message(self, sid: str, content: str, run_id: str | None = None) -> str:
         # 根据sid找到session
@@ -129,3 +132,36 @@ class SessionManager:
                 log.info(msg="SessionManager->send_message->bus publish chat waiting for input Successful")
             self._store.write_meta(session)
             return run_id
+
+    async def compact(self, sid: str, focus: str = "") -> Any: # 压缩id为sid的会话历史，并覆写thread.jsonl
+        session = self._get_session(sid)
+        lock = self._locks[sid]
+        if lock.locked():
+            raise HandlerError(SESSION_BUSY, "session busy")
+        if self._provider is None:
+            raise HandlerError(-32020, "provider not available for compaction")
+        async with lock:
+            from copy_claude.core.bus.commands import SessionCompactResult
+            from copy_claude.core.compact.compactor import Compactor
+            messages = self._store.read_messages(sid)
+            session_dir = self._store.session_dir(sid)
+            compactor = Compactor(self._bus, session_dir, sid)
+            result = await compactor.compact_messages(messages, self._provider, focus=focus)
+            if result is None:
+                raise HandlerError(-32021, "compaction failed or not beneficial")
+            self._store.write_compacted(sid, [
+                {"role": "user", "content": result.summary_text},
+                {"role": "assistant", "content": "Understood, I'll continue from this summary."},
+            ])  #S6write_compacted() 会覆盖 thread.jsonl，并把原文件备份成 .bak。
+            last_run_id = session.run_ids[-1] if session.run_ids else ""
+            await self._bus.publish(ContextCompactedEvent(
+                session_id=sid,
+                run_id=last_run_id,
+                original_tokens=result.original_token_estimate,
+                summary_tokens=result.summary_tokens,
+                ts=_now(),
+            ))
+            return SessionCompactResult(
+                summary_tokens=result.summary_tokens,
+                saved_tokens=max(0, result.original_token_estimate - result.summary_tokens),
+            )

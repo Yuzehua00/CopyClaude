@@ -88,6 +88,13 @@ class PermissionRespondCommand(BaseModel):
 class PermissionRespondResult(BaseModel):
     ok: bool = True
 
+class SessionCompactCommand(BaseModel):
+    type: Literal["session.compact"] = "session.compact"
+    session_id: str
+    focus: str = ""
+class SessionCompactResult(BaseModel):
+    summary_tokens: int
+    saved_tokens: int
 
 Command = Annotated[  # Annotated	附加元数据，不改变类型	仍视为原始类型	元数据可通过 __metadata__ 访问
     PingCommand |
@@ -96,6 +103,8 @@ Command = Annotated[  # Annotated	附加元数据，不改变类型	仍视为原
     SessionCreateCommand |
     SessionSendMessageCommand |
     SessionGetHistoryCommand |
-    SessionCloseCommand,  # 基本类型
+    SessionCloseCommand |
+    SessionCompactCommand |
+    PermissionRespondCommand,  # 基本类型
     Discriminator("type"),  # 元数据，任意 Python 对象，通常是一些描述约束或行为的对象，元数据能跟前面的原始数据一起被读取，用来进行一些判断。
 ]
