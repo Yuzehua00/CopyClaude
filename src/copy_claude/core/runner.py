@@ -5,12 +5,16 @@ from datetime import datetime, UTC
 
 from copy_claude.core.compact.compactor import Compactor
 from copy_claude.core.config import CopyClaudeConfig
+from copy_claude.core.mcp.server import McpServerManager
 from copy_claude.core.permission.manager import PermissionManager
 from copy_claude.core.runs import new_run_id, RUNS_DIR
 from copy_claude.core.events.bus import EventBus, EventHandler
 from copy_claude.core.events.writer import EventWriter
 from copy_claude.core.llm.base import LLMProvider
 from copy_claude.core.llm.provider import AnthropicProvider
+from copy_claude.core.skills.loader import Skill
+from copy_claude.core.subagent.registry import BackgroundTaskRegistry
+from copy_claude.core.subagent.tool import SpawnAgentTool, AgentResultTool
 from copy_claude.core.tools.builtin.note_save import NoteSaveTool
 from copy_claude.core.tools.registry import ToolRegistry
 from copy_claude.core.tools.builtin import (
@@ -57,8 +61,10 @@ class AgentRunner:  # AgentRunner负责将AgentLoop需要的所有组件全都�
                  provider: LLMProvider | None = None,  # 只要实现了async chat函数就可以通过静态类型检查,传入None
                  trace: TraceWriter | None = None,
                  permission_manager: PermissionManager | None = None,
-                 # mcp_manager: McpServerManager | None = None,
+                 mcp_manager: McpServerManager | None = None,
                  ):
+        # 跨 run 共享的后台 subagent 任务注册表
+        self._task_registry = BackgroundTaskRegistry()
         self._config = config
         self._extra_handlers: List[EventHandler] = extra_handlers or []
         self._runs_dir = runs_dir or RUNS_DIR
@@ -66,33 +72,69 @@ class AgentRunner:  # AgentRunner负责将AgentLoop需要的所有组件全都�
         self._bus = bus
         self._trace = trace
         self._permission_manager = permission_manager
-        # self._mcp_manager = mcp_manager
+        self._mcp_manager = mcp_manager
 
     async def run(self, goal: str,
                   *,
                   run_id: str = None, ) -> None:
         await self.run_and_capture(goal, run_id=run_id)
 
-    def _build_registry(self,
-                        task_manager: TaskManager,
-                        *,
-                        session: Session | None = None,
-                        store: SessionStore | None = None,
-                        run_id: str | None = None
-                        ) -> ToolRegistry:
+    def _build_registry(
+        self,
+        task_manager: TaskManager,
+        *,
+        session: Session | None = None,
+        store: SessionStore | None = None,
+        run_id: str | None = None,
+        provider: LLMProvider | None = None,
+        bus: EventBus | None = None,
+        child_runs_dir: Path | None = None,
+        session_id: str = "",
+        tool_whitelist: list[str] | None = None,
+    ) -> ToolRegistry:
+        allowed: set[str] | None = set(tool_whitelist) if tool_whitelist else None
+
+        def _ok(name: str) -> bool:
+            return allowed is None or name in allowed
+
         registry = ToolRegistry()
-        # 初始化一些工具：
-        for t in [ReadFileTool(), WriteFileTool(), ListDirTool(), BashTool()]:
-            registry.register(t)
+        for t in [ReadFileTool(), BashTool(), WriteFileTool(), ListDirTool()]:
+            if _ok(t.name):
+                registry.register(t)
         for t in [
             TaskCreateTool(task_manager),
             TaskUpdateTool(task_manager),
             TaskListTool(task_manager),
             TaskGetTool(task_manager),
         ]:
-            registry.register(t)
+            if _ok(t.name):
+                registry.register(t)
         if session is not None and store is not None and run_id is not None:
-            registry.register(NoteSaveTool(store, session.id, run_id))
+            note_tool = NoteSaveTool(store, session.id, run_id)
+            if _ok(note_tool.name):
+                registry.register(note_tool)
+        if provider is not None and bus is not None and run_id is not None:
+            runs_dir = child_runs_dir or self._runs_dir
+            if _ok("spawn_agent"):
+                registry.register(
+                    SpawnAgentTool(
+                        provider=provider,
+                        parent_bus=bus,
+                        parent_run_id=run_id,
+                        permission_manager=self._permission_manager,
+                        max_steps=self._config.agent.max_steps,
+                        task_registry=self._task_registry,
+                        runs_dir=runs_dir,
+                        session_id=session_id,
+                        depth=0,
+                    )
+                )
+            if _ok("agent_result"):
+                registry.register(AgentResultTool(self._task_registry))
+        if self._mcp_manager is not None:
+            for mcp_tool in self._mcp_manager.get_tools():
+                if _ok(mcp_tool.name):
+                    registry.register(mcp_tool)
         return registry
 
     async def run_and_capture(self,
@@ -100,7 +142,9 @@ class AgentRunner:  # AgentRunner负责将AgentLoop需要的所有组件全都�
                               *,
                               run_id: str | None = None,
                               session: Session | None = None,
-                              store: SessionStore | None = None) -> RunOutcome:
+                              store: SessionStore | None = None,
+                              system_prompt_override: str | None = None,
+                              tool_whitelist: List[str] | None = None) -> RunOutcome:
         # 1对话记录前期准备，创建run_id并生成文件夹路径，便于存储信息。
         run_id = run_id or new_run_id()
         if session is not None and store is not None:
@@ -131,7 +175,8 @@ class AgentRunner:  # AgentRunner负责将AgentLoop需要的所有组件全都�
                                    prefill_messages=history,
                                    session_notes=notes,
                                    global_context=global_ctx,
-                                   project_context=project_ctx)
+                                   project_context=project_ctx,
+                                   system_prompt_override=system_prompt_override)
         # 5将上下文事件记录的脚本开启。
         # 修改顺序，即使 LLM provider 初始化失败，客户端也已经收到了 run.started，而不是一直等待什么都不知道。
         async with EventWriter(run_path / "events.jsonl") as writer:
@@ -140,7 +185,7 @@ class AgentRunner:  # AgentRunner负责将AgentLoop需要的所有组件全都�
             cancelled = False
             try:
                 # 3正式循环，需要llm（provider）,工具箱，循环控制器
-                registry = self._build_registry(task_manager)
+
                 provider = self._provider or AnthropicProvider(model=self._config.llm.default_model)  # provider为后者
                 if self._trace is not None:
                     provider = TraceProvider(self._trace, provider,
@@ -148,6 +193,22 @@ class AgentRunner:  # AgentRunner负责将AgentLoop需要的所有组件全都�
                 session_dir = store.session_dir(session.id) if session is not None and store is not None else run_path
                 session_id_str = session.id if session is not None else ""
                 compactor = Compactor(bus, session_dir, session_id_str)
+                child_runs_dir = (
+                    store.runs_dir(session.id)
+                    if session is not None and store is not None
+                    else self._runs_dir
+                )
+                registry = self._build_registry(
+                    task_manager,
+                    session=session,
+                    store=store,
+                    run_id=run_id,
+                    provider=provider,
+                    bus=bus,
+                    child_runs_dir=child_runs_dir,
+                    session_id=session_id_str,
+                    tool_whitelist=tool_whitelist,
+                )
                 loop = AgentLoop(provider, registry, bus,
                                  permission_manager=self._permission_manager
                                  , session_id=session_id_str,

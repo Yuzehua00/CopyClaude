@@ -29,6 +29,7 @@ from copy_claude.core.bus.commands import (  # Command添加session创建和sess
 from copy_claude.core.bus.envelope import EventPushEnvelope
 from copy_claude.core.llm.provider import AnthropicProvider
 from copy_claude.core.logging_setup import setup_logging
+from copy_claude.core.mcp.server import McpServerManager
 from copy_claude.core.permission.manager import PermissionManager
 from copy_claude.core.session.store import SessionStore
 from copy_claude.core.transport.socket_server import SocketServer, get_connection_writer
@@ -62,6 +63,7 @@ class CoreApp:  # 所有用户的命令处理器都在这里定义，真正的�
         self._trace: TraceWriter | None = None
         self._sessions:SessionManager|None = None
         self._permission_manager: PermissionManager|None = None
+        self._mcp_manager = McpServerManager()
 
     async def _ping_handler(self, params: Dict[str:Any]) -> PongResult:  # 处理ping命令
         cmd = PingCommand.model_validate(params)  # 此种语境下传过来的是PingCommand
@@ -200,6 +202,11 @@ class CoreApp:  # 所有用户的命令处理器都在这里定义，真正的�
             self._trace = TraceWriter(trace_path)
             await self._trace.start()
             self._bus.subscribe(self._trace_event_handler)
+        self._mcp_manager = McpServerManager()
+        if self._config.mcp.servers:
+            logger.info("mcp: starting %d server(s)", len(self._config.mcp.servers))
+            await self._mcp_manager.start_all(self._config.mcp.servers)
+
 
         self._sessions = SessionManager(
             store,
@@ -208,6 +215,7 @@ class CoreApp:  # 所有用户的命令处理器都在这里定义，真正的�
                 bus=self._bus,
                 trace=self._trace,
                 permission_manager=self._permission_manager,
+                mcp_manager=self._mcp_manager,
             ),
             bus=self._bus,
             provider=compact_provider,
@@ -247,6 +255,13 @@ class CoreApp:  # 所有用户的命令处理器都在这里定义，真正的�
                 await asyncio.Event().wait()
             except asyncio.CancelledError:
                 logger.info("收到中断信号，正在优雅关闭...")
+        logger.info("shutting down")
+        for run_task in list(self._running_runs):
+            run_task.cancel()
+        if self._running_runs:
+            await asyncio.gather(*self._running_runs, return_exceptions=True)
+        if self._mcp_manager is not None:
+            await self._mcp_manager.stop_all()
         await server.stop()  # 确保清理
         if self._trace is not None:
             await self._trace.stop()

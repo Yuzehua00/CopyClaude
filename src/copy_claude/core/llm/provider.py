@@ -60,7 +60,7 @@ class AnthropicProvider:
         # system prompt：告诉 LLM 它是谁、能做什么
         system_blocks: list[dict[str, object]] = [
             {"type": "text",
-             "text": self._prompt,
+             "text": system or self._prompt,
              "cache_control": {"type": "ephemeral"}}
         ]
 

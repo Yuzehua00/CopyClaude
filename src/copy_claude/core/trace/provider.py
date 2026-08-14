@@ -40,7 +40,7 @@ class TraceProvider:
             data=chat_data,
         ))
         t0 = time.monotonic()
-        result = await self._inner.chat(messages, tool_schemas, bus, run_id, step=step)
+        result = await self._inner.chat(messages, tool_schemas, bus, run_id, step=step,system=system)
         latency_ms = int((time.monotonic() - t0) * 1000)
         resp_data:dict[str,any]
         if self._include_payload:

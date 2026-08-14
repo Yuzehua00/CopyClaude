@@ -1,5 +1,6 @@
 from __future__ import annotations
 import asyncio
+import logging
 
 from copy_claude.core.llm.base import LLMProvider
 from copy_claude.core.llm.provider import SYSTEM_PROMPT
@@ -54,12 +55,17 @@ class AgentLoop:  # 一句话的循环
                 context.mark_failed("cancelled")  # 记录系统记录llm运行错误及原因。
                 raise  # 如果这里不挂起，那么会执行到后面，导致使用未初始化的变量response
             except Exception:
+                logging.getLogger(__name__).exception(
+                    "LLM call failed run_id=%s step=%d", context.run_id, context.step
+                )
                 context.mark_failed("llm_error")
                 break
 
             # ----observe：把 LLM 响应追加到对话历史---------------
             # llm返回一个是对话信息，一个是工具调用信息。
             blocks = []
+            if response.text:
+                blocks.append({"type": "text", "text": response.text})
             blocks.append({"type": "text", "text": response.text})  # 记录llm返回文本。
             for tc in response.tool_calls:
                 blocks.append({"type": "tool_use", "id": tc.id, "name": tc.name, "input": tc.input})  # 记录工具调用情况
@@ -68,11 +74,22 @@ class AgentLoop:  # 一句话的循环
             # ---------act,调用llm用的工具-----------------------
             if response.stop_reason == "tool_use":
                 for tc in response.tool_calls:
-                    # 调用工具的函数。
-                    result = await invoke_tool(self._registry, tc, self._bus, context.run_id,
-                                               permission_manager=self._permission_manager,
-                                               session_id=self._session_id)
+                    result = await invoke_tool(
+                        self._registry, tc, self._bus, context.run_id,
+                        permission_manager=self._permission_manager,
+                        session_id=self._session_id,
+                    )
                     context.add_tool_result(tc.id, result.content, is_error=result.is_error)
+            elif response.stop_reason == "max_tokens" and response.tool_calls:
+                # Output token limit hit mid-tool-call; input is incomplete.
+                # Add synthetic error results so the conversation stays balanced.
+                for tc in response.tool_calls:
+                    context.add_tool_result(
+                        tc.id,
+                        "Error: output token limit reached before this tool call could be completed. "
+                        "Please break the task into smaller steps and try again.",
+                        is_error=True,
+                    )
             # ── 终止检查 ──────────────────────────────────────────
             if response.stop_reason == "end_turn":
                 context.mark_success()

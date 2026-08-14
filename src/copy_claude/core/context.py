@@ -18,6 +18,7 @@ class ExecutionContext:  # Agent记忆模块。聊天上下文,每次交互的�
     status: str = "running"  # "running" | "success" | "failed" ，决定是否运行
     reason: str | None = None
     result: str = ""
+    system_prompt_override:str = ""
 
     def __post_init__(self) -> None:
         # goal 在初始化时自动变成第一条对话消息
@@ -60,7 +61,7 @@ class ExecutionContext:  # Agent记忆模块。聊天上下文,每次交互的�
         # S6:会话notes\全局上下文\项目上下文，哪个有就填哪个。
         # 为什么存在系统提示词里？因为这些不是某一轮用户消息。~/.kama/context.md 可能是用户长期偏好，.kama/context.md 可能是项目目录约定，
         # notes.md 是会话事实层。它们都是工作背景。
-        parts = [base]
+        parts = [self.system_prompt_override if self.system_prompt_override else base]
         if self.global_context.strip():
             parts.append("\n\n## Global Context\n" + self.global_context.strip())
         if self.project_context.strip():

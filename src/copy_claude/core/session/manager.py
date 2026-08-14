@@ -16,10 +16,11 @@ from copy_claude.core.bus.events import (
     SessionReceivedMessageEvent,
     SessionWaitingForInputEvent,
     SessionClosedEvent,
-    ContextCompactedEvent)
+    ContextCompactedEvent, SkillInvokedEvent)
 from copy_claude.core.events.bus import EventBus
 from copy_claude.core.llm.base import LLMProvider
 from copy_claude.core.runner import AgentRunner
+from copy_claude.core.skills.loader import SkillLoader
 
 SESSION_NOT_FOUND = -32010
 SESSION_CLOSED = -32011
@@ -46,7 +47,7 @@ class SessionManager:
         self._provider = provider  # 用于压缩完整上下文事件。
         self._sessions: dict[str, Session] = {}  # 根据sid查询具体的会话。
         self._locks: dict[str, asyncio.Lock] = {}  # 给会话上锁，视为一种互斥资源，不能多次访问。
-        self._skill_loader = None  # 加载已经下载的技能。
+        self._skill_loader = SkillLoader()  # 加载已经下载的技能。
 
     async def create(self, mode: SessionMode, title: str = "") -> Session:
         s_id = f"sess-{uuid.uuid4().hex[:12]}"
@@ -111,8 +112,32 @@ class SessionManager:
             session.run_ids.append(run_id)
             session.updated_at = _now()
             self._store.write_meta(session)
+
+
+            # S7:skill解析，根据输入的/判断指令
+            goal = content
+            system_prompt_override: str | None = None
+            tool_whitelist: list[str] | None = None
+            if content.startswith("/"):
+                parts = content[1:].split(None, 1)
+                skill_name = parts[0]
+                arguments = parts[1] if len(parts) > 1 else ""
+                skill = self._skill_loader.resolve(skill_name)
+                if skill is not None:
+                    goal = self._skill_loader.render_prompt(skill,arguments)
+                    system_prompt_override = skill.system_prompt_template
+                    tool_whitelist = skill.allowed_tools or None
+                    await self._bus.publish(
+                        SkillInvokedEvent(
+                            skill_name=skill_name,
+                            arguments=arguments,
+                            run_id=run_id,
+                            ts=_now(),
+                        )
+                    )
+
             runner = self._runner_factory()
-            await runner.run_and_capture(goal=content, run_id=run_id, session=session, store=self._store)
+            await runner.run_and_capture(goal=goal, run_id=run_id, session=session, store=self._store)
             log.info(msg="SessionManager->send_message->run_and_capture Successful")
             session.updated_at = _now()
             log.info(msg="SessionManager->send_message->update time Successful")
